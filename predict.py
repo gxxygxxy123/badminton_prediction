@@ -59,7 +59,7 @@ def predict2d(curve, model, model_type, max_predict_number=300, touch_ground_sto
         trg = np.zeros((BATCH_SIZE,max_predict_number,3))
         # np.set_printoptions(suppress=True)
         # print(curve)
-        output = model(curve, trg, seq2seq_output_fps,0) # turn of teacher forcing
+        output = model(curve, trg,0) # turn of teacher forcing
 
         # sys.exit(1)
         curve = torch.cat((curve,output[:,repeat:,:]),dim=1)

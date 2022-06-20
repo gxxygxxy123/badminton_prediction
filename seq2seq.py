@@ -55,11 +55,12 @@ class Decoder(nn.Module):
 
     def forward(self, input, hidden, cell):
         
-        #input = [batch size, 1, in_size]
+        #input = [batch size, in_size]
         #hidden = [n layers * n directions=1, batch size, hid dim]
         #cell = [n layers * n directions=1, batch size, hid dim]
         
         # input = self.dropout(input)
+        input = input.unsqueeze(1) # -> [batch size, 1, in_size]
 
         output, (hidden, cell) = self.lstm(input, (hidden, cell))
         #output = [batch size, seq len=1, hid dim * n directions=1]
@@ -85,7 +86,7 @@ class Seq2Seq(nn.Module):
         #assert encoder.n_layers == decoder.n_layers, \
         #    "Encoder and decoder must have equal number of layers!"
         
-    def forward(self, src, trg, output_fps, teacher_forcing_ratio = 0.5):
+    def forward(self, src, trg, teacher_forcing_ratio = 0.5):
         #src = [batch size, src len, in_size]
         #trg = [batch size, trg len, out_size]
 
@@ -96,15 +97,18 @@ class Seq2Seq(nn.Module):
         trg_len = trg.shape[1]
         
         #tensor to store decoder outputs
-        outputs = torch.zeros(batch_size, trg_len, self.decoder.output_dim).to(self.device)
-        
+        outputs = torch.zeros(trg.shape).to(self.device)
+
         #last hidden state of the encoder is used as the initial hidden state of the decoder
         hidden, cell = self.encoder(src)
 
         #first input to the decoder is the zero (<sos>)
         # input = torch.zeros((batch_size,1,self.decoder.input_dim)).to(self.device)
-        input = torch.zeros((batch_size,1,self.decoder.input_dim)).to(self.device)
-        input[:,0,-1:] = torch.add(src[:,-1,-1:], torch.as_tensor(1/output_fps).to(self.device))
+        # input = torch.zeros((batch_size,1,self.decoder.input_dim)).to(self.device)
+        # input[:,0,-1:] = torch.add(src[:,-1,-1:], torch.as_tensor(1/output_fps).to(self.device))
+
+        # first input to decoder is last of src
+        input = src[:, -1, :]
 
         for t in range(0, trg_len):
 
@@ -123,6 +127,6 @@ class Seq2Seq(nn.Module):
             #if teacher forcing, use actual next token as next input
             #if not, use predicted token
             # input = trg[t] if teacher_force else top1
-            input = trg[:,t:t+1,:] if teacher_force else output
+            input = trg[:,t,:] if teacher_force else output.squeeze(1)
 
         return outputs
