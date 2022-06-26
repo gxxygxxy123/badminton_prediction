@@ -14,6 +14,7 @@ import seaborn as sns
 import random
 from datetime import datetime
 from tqdm import trange
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 import argparse
 import scipy.interpolate
 import sys
@@ -40,13 +41,14 @@ def train(model, iterator, optimizer, criterion, clip, device):
     
     epoch_loss = 0
 
-    for batch_idx, (data, label, output_fps) in enumerate(iterator):
-        src = data.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, N, IN_SIZE]
-        trg = label.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, trg_len, OUT_SIZE]
+    for batch_idx, (src, src_lens, trg, trg_lens, output_fps) in enumerate(iterator):
+
+        src = src.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, N, IN_SIZE]
+        trg = trg.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, trg_len, OUT_SIZE]
 
         optimizer.zero_grad()
 
-        output = model(src, trg)
+        output = model(src, src_lens, trg, trg_lens, output_fps)
         #output = [BATCH_SIZE, trg_len, OUT_SIZE]
 
         # output_dim = output.shape[-1]
@@ -66,18 +68,26 @@ def train(model, iterator, optimizer, criterion, clip, device):
 
     return epoch_loss / len(iterator)
 
-def evaluate(model, iterator, criterion, device):
+def evaluate(model, iterator, criterion, device, epoch):
     
     model.eval()
     
     epoch_loss = 0
-    
-    with torch.no_grad():
-        for batch_idx, (data, label) in enumerate(iterator):
-            src = data.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, N, IN_SIZE]
-            trg = label.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, trg_len, OUT_SIZE]
 
-            output = model(src, trg, 0) #turn off teacher forcing
+    fig,ax = plt.subplots()
+    ax.set_title(f"Epoch {epoch}")
+
+    fig_dt, ax_dt = plt.subplots()
+    
+    dt = []
+
+    with torch.no_grad():
+        for batch_idx, (src, src_lens, trg, trg_lens, output_fps) in enumerate(iterator):
+            src = src.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, N, IN_SIZE]
+            trg = trg.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, trg_len, OUT_SIZE]
+
+            output = model(src, src_lens, trg, trg_lens, output_fps, 0) #turn off teacher forcing
+
             #output = [BATCH_SIZE, trg_len, OUT_SIZE]
 
             output_dim = output.shape[-1]
@@ -91,10 +101,43 @@ def evaluate(model, iterator, criterion, device):
             loss = criterion(output, trg)
             
             epoch_loss += loss.item()
-        
+
+            # Debug
+            src_parabola = src[0].cpu().detach().numpy().cumsum(axis=0)
+            trg_parabola = output[0].cpu().detach().numpy().cumsum(axis=0)
+
+            trg_parabola = trg_parabola + src_parabola[-1]
+            for i in range(src.shape[0]):
+                p = ax.plot(src_parabola[:,0],src_parabola[:,1],marker='o',markersize=2)
+                ax.plot(trg_parabola[:,0],trg_parabola[:,1],marker='o',markersize=4,alpha=0.3,color=p[0].get_color(), linestyle='--')
+            dt += np.diff(output[0,:,-1].cpu().detach().numpy()).tolist()
+
+        ax_dt.hist(dt, color='red')
+        ax_dt.set_title(f"dt (Seq2Seq) mean{sum(dt)/len(dt):.5f}")
+    fig.savefig(f"./trash3/{epoch}.png")
+    fig_dt.savefig(f"./trash3/{epoch}_dt.png")
+    plt.close(fig)
+    plt.close(fig_dt)
+
     return epoch_loss / len(iterator)
 
+def collate_fn(batch):
+    (src, trg, output_fps) = zip(*batch)
+    src, trg, output_fps = list(src), list(trg), list(output_fps)
 
+    src = sorted(src, key=lambda x: len(x), reverse=True)
+    src_lens = [len(x) for x in src]
+
+    src_pad = pad_sequence(src, batch_first=True, padding_value=0)
+
+    trg = sorted(trg, key=lambda x: len(x), reverse=True)
+    trg_lens = [len(x) for x in trg]
+    trg_pad = pad_sequence(trg, batch_first=True, padding_value=0)
+
+    return src_pad, src_lens, trg_pad, trg_lens, output_fps[0]
+
+
+"""
 def loss_function(output, trg):
     # output=[batch size, trg_len, 3]
     # trg   =[batch size, trg_len, 3]
@@ -105,17 +148,40 @@ def loss_function(output, trg):
 
     #loss = torch.linalg.norm(pred_points-true_points, axis=1)
     return torch.mean(loss)
+"""
+
+class MaskedMSELoss(torch.nn.Module):
+    def __init__(self):
+        super(MaskedMSELoss, self).__init__()
+
+        self.debug_rm_ts = True
+        print(f"MaskedMSELoss, debug {self.debug_rm_ts}")
+
+    def forward(self, input, target):
+
+        # Debug remove ts !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        if self.debug_rm_ts:
+            input = input[:,:,:-1]
+            target = target[:,:,:-1]
+
+        # mask is target where dx/dy/dt != 0
+        mask = (target != 0.0)
+
+        diff2 = (torch.flatten(input) - torch.flatten(target)) ** 2.0 * torch.flatten(mask)
+        result = torch.sum(diff2) / torch.sum(mask)
+        return result
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Seq2Seq Training Program")
     # parser.add_argument("-s","--seq", type=int, help="Input Time", required=True)
     parser.add_argument("-e","--epoch", type=int, help="Training Epochs", required=True)
-    parser.add_argument("--in_dropout", type=float, help="Input dropout", default=0.0)
-    parser.add_argument("--hidden_size", type=int, help="Hidden Size", default=16)
+    parser.add_argument("--in_dropout", type=float, help="Input dropout", default=0.5)
+    parser.add_argument("--hidden_size", type=int, help="Hidden Size", default=32)
     parser.add_argument("--hidden_layer", type=int, help="Hidden Layer", default=2)
     parser.add_argument("--physics_data", type=int, help="Training Datas", default=140000)
-    parser.add_argument("--batch_size", type=int, help="Batch Size", default=1)
-    parser.add_argument("--lr", type=float, help="Learning Rate", default=0.01) # SGD default lr=0.01
+    parser.add_argument("--batch_size", type=int, help="Batch Size", default=128)
+    parser.add_argument("--lr", type=float, help="Learning Rate", default=0.001) # Adam default lr=0.001
     parser.add_argument("-w","--weight", type=str, help="Ouput Weight name")
     parser.add_argument("--save_epoch", type=int, help="Save at each N epoch", default=100)
     parser.add_argument('--early_stop', action="store_true", help = 'Early Stop')
@@ -145,15 +211,17 @@ if __name__ == '__main__':
 
     # Train Dataset
     train_dataset = PhysicsDataSet_seq2seq(datas=N_PHYSICS_DATA)
-    train_dataset_dataloader = torch.utils.data.DataLoader(dataset = train_dataset, batch_size = BATCH_SIZE, shuffle = True, drop_last=True)
+    train_dataset_dataloader = torch.utils.data.DataLoader(dataset = train_dataset, batch_size = BATCH_SIZE, shuffle = True, collate_fn=collate_fn, drop_last=True)
 
     # Valid Dataset
     valid_dataset_dataloader_list = []
-    for n in range(12,13):
-        print(f"Valid n: {n}")
-        valid_dataset_dataloader_list.append(
-            torch.utils.data.DataLoader(dataset = RNNDataSet(dataset_path="../trajectories_dataset/valid/", 
-            fps=120, N=n, move_origin_2d=False, smooth_2d=True, network='seq2seq'), batch_size = BATCH_SIZE, shuffle = True, drop_last=True))
+    for fps in ([120]):
+        for n in ([24]):
+            valid_dataset_dataloader_list.append(
+                torch.utils.data.DataLoader(dataset = RNNDataSet(dataset_path="../trajectories_dataset/valid/", 
+                fps=fps, N=n, move_origin_2d=False, smooth_2d=False, network='seq2seq'), batch_size = 1, shuffle = True, collate_fn=collate_fn, drop_last=True))
+                # torch.utils.data.DataLoader(dataset= PhysicsDataSet_seq2seq(datas=100),batch_size = 1, shuffle = True, drop_last=True))
+
 
     INPUT_DIM = 3 # X Y t
     OUTPUT_DIM = 3 # X Y t
@@ -174,9 +242,10 @@ if __name__ == '__main__':
     model.to(device)
     model.apply(init_weights)
 
-    optimizer = optim.SGD(model.parameters(), lr=LEARNING_RATE)
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    criterion = nn.MSELoss(reduction='mean')
+    # criterion = nn.MSELoss(reduction='mean')
+    criterion = MaskedMSELoss()
     # criterion = loss_function
     # print("My loss function")
 
@@ -195,13 +264,13 @@ if __name__ == '__main__':
 
         valid_loss = []
         for v in valid_dataset_dataloader_list:
-            valid_loss.append(evaluate(model, v, criterion, device=device))
+            valid_loss.append(evaluate(model, v, criterion, device=device, epoch=epoch))
         valid_loss = sum(valid_loss)/len(valid_loss)
 
-        print(f"Epoch: {epoch}/{N_EPOCHS}. Train Loss: {train_loss:.4f}. Valid Loss: {valid_loss:.4f}. ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
+        print(f"Epoch: {epoch}/{N_EPOCHS}. Train Loss: {train_loss:.8f}. Valid Loss: {valid_loss:.8f}. ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
 
         if epoch % SAVE_EPOCH == 0:
-            # print(f"Epoch: {epoch}/{N_EPOCHS}. Loss: {train_loss:.4f}. ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
+            # print(f"Epoch: {epoch}/{N_EPOCHS}. Loss: {train_loss:.8f}. ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
             torch.save(model.state_dict(), f'./weight/seq2seq_weight_p{N_PHYSICS_DATA}_e{epoch}')
             print(f"Save weight ./weight/seq2seq_weight_p{N_PHYSICS_DATA}_e{epoch}")
 
@@ -210,11 +279,11 @@ if __name__ == '__main__':
             if valid_loss > last_valid_loss:
                 trigger_times += 1
                 if trigger_times >= patience:
-                    torch.save(model.state_dict(), f'./weight/seq2seq_weight_p{N_PHYSICS_DATA}_best')
-                    print(f"Early Stop At Epoch {epoch}. Save weight ./weight/seq2seq_weight_p{N_PHYSICS_DATA}_best")
+                    print(f"Early Stop At Epoch {epoch}")
                     break
             else:
                 trigger_times = 0
+                torch.save(model.state_dict(), f'./weight/seq2seq_weight_p{N_PHYSICS_DATA}_best')
             last_valid_loss = valid_loss
                 
 

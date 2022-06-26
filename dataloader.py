@@ -11,6 +11,7 @@ import time
 import sys
 import matplotlib.pyplot as plt
 import torch.nn.utils.rnn as rnn_utils
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 from scipy.integrate import solve_ivp
 
 from scipy.signal import savgol_filter
@@ -29,7 +30,7 @@ def points_change_fps(points_list: list, fps):
         assert points[i].timestamp < points[i+1].timestamp, "Points ts isn't sorted"
     init_ts = points[0].timestamp
     for i in range(len(points)):
-        assert points[i].visibility == 1, "Points Vis != 1."
+        assert points[i].visibility == 1, "Points Vis != 1." # TO DELETE should be warning
         points[i].timestamp -= init_ts
 
     ts = 0.0
@@ -49,18 +50,19 @@ def points_change_fps(points_list: list, fps):
 
 
 class RNNDataSet(torch.utils.data.Dataset):
-    def __init__(self, dataset_path: str, fps: float, N=5, move_origin_2d=True, smooth_2d=True, smooth_3d=False, poly=8, network=None, csvfile='Model3D.csv'):
+    def __init__(self, dataset_path: str, fps=None, N=5, move_origin_2d=True, smooth_2d=True, smooth_3d=False, poly=8, network=None, csvfile='Model3D.csv'):
 
-        # move_origin_2d: move the curve (self.input + self.ground_truth) to origin
+        # move_origin_2d: move the curve (self.src + self.trg) to origin
         super(RNNDataSet).__init__()
         self.trajectories_2d = {}
         # self.trajectories_2d_new = {}
         self.trajectories_3d = {}
         self.trajectories_3d2d = {}
-        self.input = [] # Used for training
-        self.ground_truth = [] # Used for training
+        self.src = [] # Used for training
+        self.trg = [] # Used for training
 
-        self._fps = fps
+        self.dataset_fps = fps
+        self.dt = []
 
         for idx in sorted(os.listdir(dataset_path)):
             if not os.path.isdir(os.path.join(dataset_path,idx)):
@@ -72,14 +74,21 @@ class RNNDataSet(torch.utils.data.Dataset):
             # Load Data From csv
             points = load_points_from_csv(csv_file)
 
-            # Change ts to fixed fps, 3D Trajecory ts reset to zero
-            points = points_change_fps(points, fps)
+            # 3D Trajectory Timestamp reset to zero
+            t0 = points[0].timestamp
+            for p in points:
+                p.timestamp -= t0
+
+            # Calculate the dataset FPS
+            if self.dataset_fps == None:
+                for i in range(len(points)-1):
+                    self.dt.append(points[i+1].timestamp-points[i].timestamp)
+            # Change ts to fixed fps
+            else: 
+                points = points_change_fps(points, self.dataset_fps)
 
             # Convert Data to numpy array
             one_trajectory = np.stack([p.toXYZT() for p in points if p.visibility == 1], axis=0)
-
-            # 3D Trajectory Timestamp reset to zero
-            # one_trajectory[:,3] -= one_trajectory[0,3] TO DELETE
 
             if smooth_3d:
                 one_trajectory[:,0], one_trajectory[:,1], one_trajectory[:,2],_,_,_ = fit_3d(one_trajectory[:,0], one_trajectory[:,1], one_trajectory[:,2], N=one_trajectory.shape[0], deg=4)
@@ -99,39 +108,35 @@ class RNNDataSet(torch.utils.data.Dataset):
                     # no ground truth
                     continue
                 for i in range(curve_2d.shape[0]-N-N+1):
-                    self.input.append(curve_2d[i:i+N])
-                    self.ground_truth.append(curve_2d[i+N:i+N+N])
+                    self.src.append(curve_2d[i:i+N])
+                    self.trg.append(curve_2d[i+N:i+N+N])
             elif network == 'seq2seq':
                 if curve_2d.shape[0] < N+1:
                     # no ground truth
                     continue
-                self.input.append(curve_2d[0:N])
-                self.ground_truth.append(curve_2d[N:])
+                self.src.append(torch.from_numpy(np.diff(curve_2d[:N+1],axis=0)))
+                self.trg.append(torch.from_numpy(np.diff(curve_2d[N:],axis=0)))
             elif network is None:
                 pass
             else:
                 print(f"Unsupported network & mode: {network}")
                 sys.exit(1)
-        if network == 'blstm' or network == 'seq2seq':
-            self.input = np.stack(self.input, axis=0)
-            if network == 'blstm':
-                self.ground_truth = np.stack(self.ground_truth, axis=0)
+        # if network == 'blstm' or network == 'seq2seq':
+        #     self.src = np.stack(self.src, axis=0)
+        #     if network == 'blstm':
+        #         self.trg = np.stack(self.trg, axis=0)
 
-            for i in range(self.input.shape[0]):
-                # For each training data, assume the first point's Timestamp as zero
-                self.ground_truth[i][:,-1] -= self.input[i][0,-1]
-                self.input[i][:,-1] -= self.input[i][0,-1]
-                if move_origin_2d:
-                    self.ground_truth[i][:,:-1] -= self.input[i][0,:-1]
-                    self.input[i][:,:-1] -= self.input[i][0,:-1]
-        if network == 'blstm':
-            assert self.input.shape[0] == self.ground_truth.shape[0], "[DataLoader] Wrong!"
+        # if network == 'blstm':
+        #     assert self.src.shape[0] == self.trg.shape[0], "[DataLoader] Wrong!"
+
+        if self.dataset_fps == None:
+            self.dataset_fps = 1/(sum(self.dt)/len(self.dt))
 
     def __len__(self):
-        return self.input.shape[0]
+        return len(self.src)
 
     def __getitem__(self, index):
-        return self.input[index], self.ground_truth[index]
+        return self.src[index], self.trg[index], torch.tensor(self.fps()).float() # TODO
 
     def whole_2d(self):
         # {1:t1, 2:t2, 3:t3, 4:t4} ...
@@ -152,7 +157,7 @@ class RNNDataSet(torch.utils.data.Dataset):
         return self.trajectories_3d2d
 
     def fps(self):
-        return self._fps
+        return self.dataset_fps
 
     def show_each(self):
         for idx, data in self.whole_2d().items():
@@ -166,8 +171,8 @@ class RNNDataSet(torch.utils.data.Dataset):
 class PhysicsDataSet_blstm(torch.utils.data.Dataset):
     def __init__(self, N=5, datas=0):
 
-        self.input = [] # Used for training
-        self.ground_truth = [] # Used for training
+        self.src = [] # Used for training
+        self.trg = [] # Used for training
 
         fps_range = (25.0,150.0)
         elevation_range = (-89.0,89.0)
@@ -199,21 +204,21 @@ class PhysicsDataSet_blstm(torch.utils.data.Dataset):
 
             assert trajectories.shape[0] == N*2, "[Physics Dataloader] BLSTM datas shape wrong."
 
-            self.input.append(trajectories[0:N,[0,2,3]])
-            self.ground_truth.append(trajectories[N:N*2,[0,2,3]])
+            self.src.append(trajectories[0:N,[0,2,3]])
+            self.trg.append(trajectories[N:N*2,[0,2,3]])
         
-        self.input = np.stack(self.input, axis=0)
-        self.ground_truth = np.stack(self.ground_truth, axis=0)
+        self.src = np.stack(self.src, axis=0)
+        self.trg = np.stack(self.trg, axis=0)
 
     def __len__(self):
-        return self.input.shape[0]
+        return self.src.shape[0]
 
     def __getitem__(self, index):
-        return self.input[index], self.ground_truth[index]
+        return self.src[index], self.trg[index]
+
 
 class PhysicsDataSet_seq2seq(torch.utils.data.Dataset):
-    def __init__(self, datas=0, in_max_drop=0.0, in_max_time=0.2, out_max_time=3, move_origin_2d=True):
-        # move_origin_2d: move the curve (self.src + self.trg) to origin
+    def __init__(self, datas=0, in_max_time=0.2, out_max_time=3):
 
         self.trajectories_2d = {}
         self.trajectories_3d2d = {}
@@ -221,56 +226,47 @@ class PhysicsDataSet_seq2seq(torch.utils.data.Dataset):
 
         self.src = [] # Used for training
         self.trg = [] # Used for training
-        self.output_fps = [] # Used for training (Seq2Seq)
+        self.output_fps = [] # Used for training
 
-        # fps_range = (25.0,150.0)
+        fps_range = (25.0,150.0)
         # fps_range = (118.0,122.0)
         elevation_range = (-80.0,80.0)
         speed_range = (5.0,250.0) # km/hr
-        # output_fps_range = (25.0,150.0) # Only used for Seq2Seq
+        output_fps_range = (25.0,150.0) # Only used for Seq2Seq
         # output_fps_range = (118.0,122.0) # Only used for Seq2Seq
 
-        random_datas = np.random.uniform(low =[elevation_range[0], speed_range[0]],
-                                                high=[elevation_range[-1],speed_range[-1]],
-                                                size=(datas,2))
-        fpss = [120]
+        random_datas = np.random.uniform(low =[fps_range[0], elevation_range[0], speed_range[0], output_fps_range[0]],
+                                                high=[fps_range[-1],elevation_range[-1],speed_range[-1],output_fps_range[-1]],
+                                                size=(datas,4))
+
         print("===Physics Dataset===")
-        print(f"FPS: {fpss}")
-        # print(f"FPS: {fps_range[0]} ~ {fps_range[-1]}")
+        print(f"FPS: {fps_range[0]} ~ {fps_range[-1]}")
         print(f"Elevation: {elevation_range[0]} ~ {elevation_range[-1]} degree")
         print(f"Speed: {speed_range[0]} ~ {speed_range[-1]} km/hr")
-        #print(f"Output Fps: {output_fps_range[0]} ~ {output_fps_range[-1]}")
+        print(f"Output Fps: {output_fps_range[0]} ~ {output_fps_range[-1]}")
 
-        print(f"In Max Drop: {in_max_drop}")
         print(f"In Max Time: {in_max_time}s")
         print(f"Out Max Time: {out_max_time}s")
         print(f"Datas: {random_datas.shape[0]}")
-        # print(f"Datas for each fps: {datas}. Total: {datas*(fps_range[-1]-fps_range[0]+1)}")
-
-        debug = True
-        if debug:
-            print(f"[Debug] in_time = 0.1 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         starting_point = [0, 0, 3]
 
-
+        debug = False
+        if debug:
+            print(f"Debug: {debug} fps/out fps: 120, in_max_time: {in_max_time}  !!!!!!!!!!!!!!")
 
         idx = 1
-        for e,s in random_datas:
-            fps = random.choice(fpss)
-            output_fps = fps
-            assert in_max_drop >= 0.0 and in_max_drop < 1.0, "in_max_drop should between 0.0~1.0"
-            
-            in_time = random.uniform(2/fps, in_max_time)
-            # # Debug ## !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        for fps,e,s,output_fps in random_datas:
+
+            # Debug
             if debug:
-                in_time = 0.1
+                fps = 120
+                output_fps = 120
 
-            in_drop = random.uniform(0.0, in_max_drop)
-
-            in_t = sorted(np.random.choice(np.arange(0,in_time*fps)*(1/fps),
-                    size=max(2,int(in_time*fps*(1-in_drop))), # at least 2 point
+            in_t = sorted(np.random.choice(np.arange(0,in_max_time*fps)*(1/fps),
+                    size=round(random.uniform(2,in_max_time*fps)), # at least 2 point
                     replace=False))
+
 
             in_t = in_t - in_t[0] # reset time to zero
             out_t = np.arange(0,out_max_time*output_fps)*(1/output_fps) + in_t[-1] + (1/output_fps)
@@ -287,24 +283,32 @@ class PhysicsDataSet_seq2seq(torch.utils.data.Dataset):
 
             assert len(in_t)+len(out_t) == trajectories.shape[0], " "
 
-
+            """ Input (x,y) not vector
             self.src.append(trajectories[:len(in_t),[0,2,3]])
             self.trg.append(trajectories[len(in_t):,[0,2,3]])
-            self.output_fps.append(output_fps)
+            # self.output_fps.append(output_fps)
+            """
 
-        
+            # Input (x,y) is vector
+            self.src.append(torch.from_numpy(np.diff(trajectories[:len(in_t),[0,2,3]],axis=0)))
+            self.trg.append(torch.from_numpy(np.diff(trajectories[len(in_t)-1:,[0,2,3]],axis=0)))
+            self.output_fps.append(torch.tensor(output_fps).float())
+
             self.trajectories_2d[int(idx)] = trajectories[:,[0,2,3]].copy()
             self.trajectories_3d2d[int(idx)] = trajectories.copy()
             idx += 1
+
+        """ Input (x,y) not vector
 
         for i in range(len(self.src)):
             # For each training data, assume the first point's Timestamp as zero
             self.trg[i][:,-1] -= self.src[i][0,-1]
             self.src[i][:,-1] -= self.src[i][0,-1]
-            if move_origin_2d:
-                self.trg[i][:,:-1] -= self.src[i][0,:-1]
-                self.src[i][:,:-1] -= self.src[i][0,:-1]
 
+            # Move first point(x,y) to (0,0)
+            self.trg[i][:,:-1] -= self.src[i][0,:-1]
+            self.src[i][:,:-1] -= self.src[i][0,:-1]
+        """
         # stack with zero padding
         # max_len = 0
         # for tra in self.trg:

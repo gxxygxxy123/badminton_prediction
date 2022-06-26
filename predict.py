@@ -18,8 +18,11 @@ sys.path.append(f"{ROOTDIR}/lib")
 from writer import CSVWriter
 from point import Point
 
-def predict2d(curve, model, model_type, max_predict_number=300, touch_ground_stop=True, seq2seq_output_fps=None, move_origin_2d=True, repeat=0):
+def predict2d(curve, model, model_type, max_predict_number=3000, touch_ground_stop=True, seq2seq_output_fps=None, move_origin_2d=True):
     # curve shape: (N,3), 3:XY,Z,t
+
+    # curve = curve[:,:-1] # DEBUG remove timestamp
+
     N = curve.shape[0]
     BATCH_SIZE = 1
     curve =np.expand_dims(curve, axis=0) # One Batch
@@ -46,7 +49,7 @@ def predict2d(curve, model, model_type, max_predict_number=300, touch_ground_sto
             if move_origin_2d:
                 pred = pred + tmp
 
-            curve = torch.cat((curve,pred[:,repeat:,:]),dim=1)
+            curve = torch.cat((curve,pred[:,:,:]),dim=1)
 
             if touch_ground_stop:
                 if curve[0][-1][1]+init_state[0][1] <= 0: # Touch Ground
@@ -56,13 +59,18 @@ def predict2d(curve, model, model_type, max_predict_number=300, touch_ground_sto
         
 
     elif model_type == 'seq2seq':
-        trg = np.zeros((BATCH_SIZE,max_predict_number,3))
-        # np.set_printoptions(suppress=True)
-        # print(curve)
-        output = model(curve, trg,0) # turn of teacher forcing
+        src = torch.diff(curve,axis=1)
 
-        # sys.exit(1)
-        curve = torch.cat((curve,output[:,repeat:,:]),dim=1)
+        trg = torch.zeros((BATCH_SIZE,max_predict_number,3))
+
+        output = model(src, [src.shape[1]], trg, [trg.shape[1]], seq2seq_output_fps, 0) # turn of teacher forcing
+        # output=[BATCH_SIZE, TIME_SEQ_LEN, IN_SIZE]
+
+        output = output.cumsum(axis=1)
+
+        output = output + curve[:,-1,:]
+
+        curve = torch.cat((curve,output),dim=1)
         if touch_ground_stop:
             for i in range(curve.shape[1]):
                 if curve[0][i][1]+init_state[0][1] <= 0:

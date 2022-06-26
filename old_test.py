@@ -28,7 +28,7 @@ parser.add_argument("--blstm_weight", type=str, help="BLSTM Weight", default=Non
 parser.add_argument("--seq2seq_weight", type=str, help="Seq2Seq Weight", default=None)
 parser.add_argument("--folder", type=str, help="Test Folder", required=True)
 parser.add_argument('--no_show', action="store_true", help = 'No plt.show()')
-parser.add_argument("--fps", type=float, default=None, help="Trajectories FPS")
+parser.add_argument("--fps", type=int, help="Trajectories FPS", required=True)
 args = parser.parse_args()
 
 # Argument
@@ -42,7 +42,7 @@ fps = args.fps
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 # Dataset
-test_dataset = RNNDataSet(dataset_path=TEST_DATASET, fps=fps, N=N, smooth_2d=True, smooth_3d=False)
+test_dataset = RNNDataSet(dataset_path=TEST_DATASET, N=N, smooth_2d=False, smooth_3d=False, fps=fps)
 #test_dataset = PhysicsDataSet_seq2seq(datas=100, out_max_time=2)
 
 trajectories_2d = test_dataset.whole_2d()
@@ -121,7 +121,7 @@ if SEQ2SEQ_WEIGHT:
 
     INPUT_DIM = 3 # X Y t
     OUTPUT_DIM = 3 # X Y t
-    HIDDEN_SIZE = 32
+    HIDDEN_SIZE = 16
     N_LAYERS = 2
     IN_DROPOUT = 0.0
 
@@ -133,31 +133,27 @@ if SEQ2SEQ_WEIGHT:
     model.eval()
 
     fig2, ax2 = plt.subplots()
-    ax2.set_title(f"Seq2Seq, FPS({fps}), N({N}), weight({SEQ2SEQ_WEIGHT})")
-
-    fig_dt, ax_dt = plt.subplots()
-    ax_dt.set_title("dt (Seq2Seq)")
-    dt = []
+    ax2.set_title("Seq2Seq")
 
     with torch.no_grad():
         for idx, trajectory in trajectories_2d.items():
             if trajectory.shape[0] < N:
                 continue
-            output_2d = predict2d(trajectory[:N], model, 'seq2seq', seq2seq_output_fps=test_dataset.fps())
+            output_2d = predict2d(trajectory[:N], model, 'seq2seq', seq2seq_output_fps=120)
 
             p = ax2.plot(trajectory[:,0],trajectory[:,1],marker='o',markersize=2)
             ax2.plot(output_2d[:,0],output_2d[:,1],marker='o',markersize=4,alpha=0.3,color=p[0].get_color(), linestyle='--')
 
-            dt += np.diff(output_2d[:,-1]).tolist()
-            #seq2seq_space_2d.append(space_err(trajectory[N:], output_2d[N:]))
-            #seq2seq_space_time_2d.append(space_time_err(trajectory[N:], output_2d[N:]))
-            #seq2seq_time.append(time_err(trajectory[N:], output_2d[N:]))
-        """
+
+            seq2seq_space_2d.append(space_err(trajectory[N:], output_2d[N:]))
+            seq2seq_space_time_2d.append(space_time_err(trajectory[N:], output_2d[N:]))
+            seq2seq_time.append(time_err(trajectory[N:], output_2d[N:]))
+            
         for idx, trajectory in trajectories_3d.items():
             if trajectory.shape[0] < N:
                 continue
 
-            output_3d = predict3d(trajectory[:N], model, 'seq2seq', seq2seq_output_fps=test_dataset.fps())
+            output_3d = predict3d(trajectory[:N], model, 'seq2seq', seq2seq_output_fps=120)
 
             seq2seq_space_3d.append(space_err(trajectory[N:], output_3d[N:]))
             seq2seq_space_time_3d.append(space_time_err(trajectory[N:], output_3d[N:]))
@@ -168,17 +164,14 @@ if SEQ2SEQ_WEIGHT:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             seq2seq_time_after_3d = np.nanmean(np.array(seq2seq_time_after_3d), axis=0)
-        """
-        ax_dt.hist(dt,color='red')
-        print(sum(dt)/len(dt))
-    # print(f"===Seq2Seq===")
-    # print(f"Weight: {SEQ2SEQ_WEIGHT}")
-    # print(f"Space Error 2D (Average): {np.nanmean(seq2seq_space_2d):.2f}m")
-    # print(f"Space Time Error 2D (Average): {np.nanmean(seq2seq_space_time_2d):.2f}m")
-    # print(f"Space Error 3D (Average): {np.nanmean(seq2seq_space_3d):.2f}m")
-    # print(f"Space Time Error 3D (Average): {np.nanmean(seq2seq_space_time_3d):.2f}m")
-    # print(f"Time Error (Average): {np.nanmean(seq2seq_time):.3f}s")
 
+    print(f"===Seq2Seq===")
+    print(f"Weight: {SEQ2SEQ_WEIGHT}")
+    print(f"Space Error 2D (Average): {np.nanmean(seq2seq_space_2d):.2f}m")
+    print(f"Space Time Error 2D (Average): {np.nanmean(seq2seq_space_time_2d):.2f}m")
+    print(f"Space Error 3D (Average): {np.nanmean(seq2seq_space_3d):.2f}m")
+    print(f"Space Time Error 3D (Average): {np.nanmean(seq2seq_space_time_3d):.2f}m")
+    print(f"Time Error (Average): {np.nanmean(seq2seq_time):.3f}s")
     # ax2.plot(np.arange(0, 3, 0.1),time_after_error_3d)
 
 

@@ -16,9 +16,9 @@ from point import load_points_from_csv
 
 def space_err(gt_curve, pd_curve, bidirectional=False):
     # ground truth & predict curve shape: (?, 3) or (?, 4), must include timestamp
-    assert (gt_curve.ndim == 2 and pd_curve.ndim == 2 and
-            gt_curve.shape[1] == pd_curve.shape[1] and
-            (gt_curve.shape[1] == 3 or gt_curve.shape[1] == 4)), "Wrong"
+    # assert (gt_curve.ndim == 2 and pd_curve.ndim == 2 and
+    #         gt_curve.shape[1] == pd_curve.shape[1] and
+    #         (gt_curve.shape[1] == 3 or gt_curve.shape[1] == 4)), "Wrong"
     if gt_curve.shape[0] == 0 or pd_curve.shape[0] == 0:
         return np.nan
 
@@ -95,9 +95,9 @@ def space_err(gt_curve, pd_curve, bidirectional=False):
 
 def time_err(gt_curve, pd_curve, bidirectional=False):
     # ground truth & predict curve shape: (?, 3) or (?, 4), must include timestamp
-    assert (gt_curve.ndim == 2 and pd_curve.ndim == 2 and
-            gt_curve.shape[1] == pd_curve.shape[1] and
-            (gt_curve.shape[1] == 3 or gt_curve.shape[1] == 4)), "Wrong"
+    # assert (gt_curve.ndim == 2 and pd_curve.ndim == 2 and
+    #         gt_curve.shape[1] == pd_curve.shape[1] and
+    #         (gt_curve.shape[1] == 3 or gt_curve.shape[1] == 4)), "Wrong"
     if gt_curve.shape[0] == 0 or pd_curve.shape[0] == 0:
         return np.nan
 
@@ -190,9 +190,9 @@ def time_err(gt_curve, pd_curve, bidirectional=False):
 
 def space_time_err(gt_curve, pd_curve, bidirectional=False):
     # ground truth & predict curve shape: (?, 3) or (?, 4), must include timestamp
-    assert (gt_curve.ndim == 2 and pd_curve.ndim == 2 and
-            gt_curve.shape[1] == pd_curve.shape[1] and
-            (gt_curve.shape[1] == 3 or gt_curve.shape[1] == 4)), "Wrong"
+    # assert (gt_curve.ndim == 2 and pd_curve.ndim == 2 and
+    #         gt_curve.shape[1] == pd_curve.shape[1] and
+    #         (gt_curve.shape[1] == 3 or gt_curve.shape[1] == 4)), "Wrong"
     if gt_curve.shape[0] == 0 or pd_curve.shape[0] == 0:
         return np.nan
 

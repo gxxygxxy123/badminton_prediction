@@ -1,10 +1,7 @@
 import scipy
-import cv2
-import argparse
 import sys
 import math
 import csv
-import requests
 import configparser
 import matplotlib.pyplot as plt
 import mpl_toolkits.mplot3d.axes3d as p3
