@@ -400,12 +400,13 @@ class PhysicsDataSet_transformer(torch.utils.data.Dataset):
         idx = 1
         for fps,e,s in random_datas:
 
-            in_t = sorted(np.random.choice(np.arange(0,in_max_time*fps)*(1/fps),
-                    size=round(random.uniform(2,in_max_time*fps)), # at least 2 point
-                    replace=False))
+            # in_t = sorted(np.random.choice(np.arange(0,in_max_time*fps)*(1/fps),
+            #         size=round(random.uniform(2,in_max_time*fps)), # at least 2 point
+            #         replace=False))
+            #in_t = in_t - in_t[0] # reset time to zero
 
+            in_t = np.arange(0,round(random.uniform(2,in_max_time*fps)))*(1/fps)
 
-            in_t = in_t - in_t[0] # reset time to zero
             out_t = np.arange(0,out_max_time*self.output_fps)*(1/self.output_fps) + in_t[-1] + (1/self.output_fps)
 
             teval = np.concatenate((in_t, out_t))
