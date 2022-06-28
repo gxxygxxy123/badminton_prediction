@@ -48,8 +48,10 @@ class Decoder(nn.Module):
         self.input_dim = input_dim
         self.hid_dim = hid_dim
         self.n_layers = n_layers
-        
+
         self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hid_dim, num_layers=n_layers, batch_first=True)
+
+        # self.batchnorm = nn.BatchNorm1d(1)
 
         self.fc_out = nn.Linear(hid_dim, output_dim)
 
@@ -85,6 +87,8 @@ class Seq2Seq(nn.Module):
         self.decoder = decoder
         self.device = device
 
+        # self.fc = nn.Linear(self.encoder.hid_dim,self.decoder)
+
         #assert encoder.hid_dim == decoder.hid_dim, \
         #    "Hidden dimensions of encoder and decoder must be equal!"
         #assert encoder.n_layers == decoder.n_layers, \
@@ -101,26 +105,28 @@ class Seq2Seq(nn.Module):
         batch_size = src.data.shape[0]
 
         trg_len = trg.data.shape[1]
-        
+
         #tensor to store decoder outputs
         outputs = torch.zeros((batch_size,trg_len,self.decoder.output_dim)).to(self.device)
 
         #last hidden state of the encoder is used as the initial hidden state of the decoder
         hidden, cell = self.encoder(src, src_lens)
 
+
+
         # first input to the decoder is the (0,0,dt)
-        input = torch.zeros((batch_size,self.decoder.input_dim)).to(self.device)
-        input[:,-1] = torch.add(src[:,-1,-1], torch.as_tensor(1/output_fps).to(self.device))
+        # input = torch.zeros((batch_size,self.decoder.input_dim)).to(self.device)
+        # input[:,-1] = torch.add(src[:,-1,-1], torch.as_tensor(1/output_fps).to(self.device))
 
 
         # first input to decoder is last of src
-        # input = src[:, -1, :]
+        input = src[:, -1, :]
 
         for t in range(0, trg_len):
 
             output, hidden, cell = self.decoder(input, hidden, cell)
             #output = [batch size, 1, output dim]
-
+            
             #place predictions in a tensor holding predictions for each point
             outputs[:,t,:] = output.squeeze(1)
             

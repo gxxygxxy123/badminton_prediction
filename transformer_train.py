@@ -1,11 +1,9 @@
-from code import interact
 import math
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"]  =  "TRUE"
 import csv
 import numpy as np
 import time
-from sklearn.utils import shuffle
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,16 +12,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import random
 from datetime import datetime
-from tqdm import trange
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 import argparse
-import scipy.interpolate
-from predict import predict2d
 import sys
+import predict
 sns.set()
 
-from dataloader import RNNDataSet, PhysicsDataSet_seq2seq
-from seq2seq import Encoder, Decoder, Seq2Seq
+from dataloader import RNNDataSet, PhysicsDataSet_transformer
+from transformer import TimeSeriesTransformer
 
 DIRNAME = os.path.dirname(os.path.abspath(__file__))
 ROOTDIR = os.path.dirname(DIRNAME)
@@ -37,32 +33,27 @@ def init_weights(m):
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def train(model, iterator, optimizer, criterion, clip, device):
+def train(model, iterator, optimizer, criterion, src_mask, trg_mask, device):
     
     model.train()
     
     epoch_loss = 0
 
-    for batch_idx, (src, src_lens, trg, trg_lens, output_fps) in enumerate(iterator):
+    for batch_idx, (src, trg, trg_y) in enumerate(iterator):
 
         src = src.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, N, IN_SIZE]
         trg = trg.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, trg_len, OUT_SIZE]
+        trg_y = trg_y.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, trg_len, OUT_SIZE]
 
         optimizer.zero_grad()
 
-        output = model(src, src_lens, trg, trg_lens, output_fps)
+        output = model(src, trg, src_mask, trg_mask)
+
         #output = [BATCH_SIZE, trg_len, OUT_SIZE]
 
-        # output_dim = output.shape[-1]
-
-        # output = output[:,1:,:].view(-1, output_dim)
-        # trg = trg[1:].view(-1)
-
-        loss = criterion(output, trg)
+        loss = criterion(output, trg_y)
 
         loss.backward()
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
 
         optimizer.step()
         
@@ -70,7 +61,7 @@ def train(model, iterator, optimizer, criterion, clip, device):
 
     return epoch_loss / len(iterator)
 
-def evaluate(model, iterator, criterion, device, epoch):
+def evaluate(model, iterator, criterion, src_mask, trg_mask, device, epoch):
     
     model.eval()
     
@@ -79,16 +70,16 @@ def evaluate(model, iterator, criterion, device, epoch):
     fig,ax = plt.subplots()
     ax.set_title(f"Epoch {epoch}")
 
-    #fig_dt, ax_dt = plt.subplots()
+    fig_dt, ax_dt = plt.subplots()
     
-    # dt = []
+    dt = []
 
     with torch.no_grad():
-        for batch_idx, (src, src_lens, trg, trg_lens, output_fps) in enumerate(iterator):
+        for batch_idx, (src, trg, output_fps) in enumerate(iterator):
             src = src.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, N, IN_SIZE]
             trg = trg.float().type(torch.FloatTensor).to(device) # [BATCH_SIZE, trg_len, OUT_SIZE]
 
-            output = model(src, src_lens, trg, trg_lens, output_fps, 0) #turn off teacher forcing
+            output = model(src, trg, src_mask, trg_mask)
 
             #output = [BATCH_SIZE, trg_len, OUT_SIZE]
 
@@ -108,53 +99,25 @@ def evaluate(model, iterator, criterion, device, epoch):
         for idx, trajectory in iterator.dataset.whole_2d().items():
             if trajectory.shape[0] < N:
                 continue
-            output_2d = predict2d(trajectory[:N], model, 'seq2seq', seq2seq_output_fps=iterator.dataset.fps(), device=device)
+            output_2d = predict.predict2d(trajectory[:N], model, 'transformer', device=device)
 
             p = ax.plot(trajectory[:,0],trajectory[:,1],marker='o',markersize=1)
             ax.plot(output_2d[:,0],output_2d[:,1],marker='o',markersize=1,alpha=0.3,color=p[0].get_color(), linestyle='--')
 
-            # dt_diff = np.diff(output_2d[N:,-1],axis=0)
-            # dt_diff = dt_diff[~np.isnan(dt_diff)]
-            # dt += dt_diff.tolist()
+            dt_diff = np.diff(output_2d[N:,-1],axis=0)
+            dt_diff = dt_diff[~np.isnan(dt_diff)]
+            dt += dt_diff.tolist()
+        if len(dt) > 0:
+            ax_dt.hist(dt, color='red')
+            ax_dt.set_title(f"dt (Transformer) mean{sum(dt)/len(dt):.5f}")
 
-        #ax_dt.hist(dt, color='red')
-        #ax_dt.set_title(f"dt (Transformer) mean{sum(dt)/len(dt):.5f}")
-
-    fig.savefig(f"./seq2seq_out0.2s/{epoch}.png")
-    #fig_dt.savefig(f"./seq2seq_fig/{epoch}_dt.png")
+    fig.savefig(f"./transformer_fig/{epoch}.png")
+    fig_dt.savefig(f"./transformer_fig/{epoch}_dt.png")
     plt.close(fig)
-    #plt.close(fig_dt)
+    plt.close(fig_dt)
 
     return epoch_loss / len(iterator)
 
-def collate_fn(batch):
-    (src, trg, output_fps) = zip(*batch)
-    src, trg, output_fps = list(src), list(trg), list(output_fps)
-
-    src = sorted(src, key=lambda x: len(x), reverse=True)
-    src_lens = [len(x) for x in src]
-
-    src_pad = pad_sequence(src, batch_first=True, padding_value=0)
-
-    trg = sorted(trg, key=lambda x: len(x), reverse=True)
-    trg_lens = [len(x) for x in trg]
-    trg_pad = pad_sequence(trg, batch_first=True, padding_value=0)
-
-    return src_pad, src_lens, trg_pad, trg_lens, output_fps[0]
-
-
-"""
-def loss_function(output, trg):
-    # output=[batch size, trg_len, 3]
-    # trg   =[batch size, trg_len, 3]
-
-    loss = torch.linalg.norm(trg[:,:,:-1]-output[:,:,:-1], axis=2) # x y (m)
-
-    loss += torch.linalg.norm(trg[:,:,-1:]-output[:,:,-1:], axis=2) * 10 # timestamp (s)
-
-    #loss = torch.linalg.norm(pred_points-true_points, axis=1)
-    return torch.mean(loss)
-"""
 
 class MaskedMSELoss(torch.nn.Module):
     def __init__(self):
@@ -177,15 +140,15 @@ class MaskedMSELoss(torch.nn.Module):
         result = torch.sum(diff2) / torch.sum(mask)
         return result
 
+def generate_square_subsequent_mask(dim1: int, dim2: int, dim3: int, device=torch.device('cpu')):
+    return torch.triu(torch.ones(dim1, dim2, dim3) * float('-inf'), diagonal=1).to(device)
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Seq2Seq Training Program")
+    parser = argparse.ArgumentParser(description="Transformer Training Program")
     # parser.add_argument("-s","--seq", type=int, help="Input Time", required=True)
     parser.add_argument("-e","--epoch", type=int, help="Training Epochs", required=True)
-    parser.add_argument("--in_dropout", type=float, help="Input dropout", default=0.5)
-    parser.add_argument("--hidden_size", type=int, help="Hidden Size", default=32)
-    parser.add_argument("--hidden_layer", type=int, help="Hidden Layer", default=2)
     parser.add_argument("--physics_data", type=int, help="Training Datas", default=140000)
-    parser.add_argument("--batch_size", type=int, help="Batch Size", default=128)
+    parser.add_argument("--batch_size", type=int, help="Batch Size", default=64)
     parser.add_argument("--lr", type=float, help="Learning Rate", default=0.001) # Adam default lr=0.001
     parser.add_argument("-w","--weight", type=str, help="Ouput Weight name")
     parser.add_argument("--save_epoch", type=int, help="Save at each N epoch", default=100)
@@ -194,19 +157,15 @@ if __name__ == '__main__':
 
     # N = args.seq # Time Sequence Number
     N_EPOCHS = args.epoch
-    IN_DROPOUT = args.in_dropout
-    HIDDEN_SIZE = args.hidden_size
-    N_LAYERS = args.hidden_layer
     N_PHYSICS_DATA = args.physics_data
     BATCH_SIZE = args.batch_size
     LEARNING_RATE = args.lr
     SAVE_EPOCH = args.save_epoch
 
+
+
     print(#f"Input Seq: {N}\n"
           f"Epoch: {N_EPOCHS}\n"
-          f"Input Dropout: {IN_DROPOUT}\n"
-          f"Hidden Size: {HIDDEN_SIZE}\n"
-          f"Hidden Layer: {N_LAYERS}\n"
           f"Physics data: {N_PHYSICS_DATA}\n"
           f"Batch Size: {BATCH_SIZE}\n"
           f"Learning Rate: {LEARNING_RATE}\n"
@@ -214,33 +173,78 @@ if __name__ == '__main__':
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
+    output_fps = 300
+
     # Train Dataset
-    train_dataset = PhysicsDataSet_seq2seq(datas=N_PHYSICS_DATA)
-    train_dataset_dataloader = torch.utils.data.DataLoader(dataset = train_dataset, batch_size = BATCH_SIZE, shuffle = True, collate_fn=collate_fn, drop_last=True)
+    train_dataset = PhysicsDataSet_transformer(datas=N_PHYSICS_DATA, output_fps=output_fps)
+    train_dataset_dataloader = torch.utils.data.DataLoader(dataset = train_dataset, batch_size = BATCH_SIZE, shuffle = True, drop_last=True)
+
 
     # Valid Dataset
     valid_dataset_dataloader_list = []
-    for fps in ([60]):
-        for n in ([8]):
+    for fps in ([120]):
+        for n in ([20]):
             valid_dataset_dataloader_list.append(
-                torch.utils.data.DataLoader(dataset = RNNDataSet(dataset_path="../trajectories_dataset/valid/", 
-                fps=fps, N=n, move_origin_2d=False, smooth_2d=True, network='seq2seq'), batch_size = 1, shuffle = True, collate_fn=collate_fn, drop_last=True))
-                # torch.utils.data.DataLoader(dataset= PhysicsDataSet_seq2seq(datas=100),batch_size = 1, shuffle = True, drop_last=True))
+                torch.utils.data.DataLoader(dataset = RNNDataSet(dataset_path="../trajectories_dataset/valid/",
+                fps=fps, N=n, move_origin_2d=False, smooth_2d=False, network='transformer'), batch_size = 1, shuffle = True, drop_last=True))
+                # torch.utils.data.DataLoader(dataset= PhysicsDataSet_transformer(datas=100),batch_size = 1, shuffle = True, drop_last=True))
+
+    dim_val = 32 # This can be any value divisible by n_heads. 512 is used in the original transformer paper.
+    n_heads = 2 # The number of attention heads (aka parallel attention layers). dim_val must be divisible by this number
+    n_decoder_layers = 2 # Number of times the decoder layer is stacked in the decoder
+    n_encoder_layers = 2 # Number of times the encoder layer is stacked in the encoder
+    input_size = 3 # The number of input variables. 1 if univariate forecasting.
+    dec_seq_len = 1000 # length of input given to decoder. Can have any integer value.
+    enc_seq_len = 100 # length of input given to encoder. Can have any integer value.
+    output_sequence_length = 1000 # Length of the target sequence, i.e. how many time steps should your forecast cover
+    max_seq_len = enc_seq_len # What's the longest sequence the model will encounter? Used to make the positional encoder
 
 
-    INPUT_DIM = 2 # X Y t
-    OUTPUT_DIM = 2 # X Y t
-    # ENC_EMB_DIM = 8
-    # DEC_EMB_DIM = 8
-    # ENC_DROPOUT = 0.5
-    # DEC_DROPOUT = 0.5
 
-    CLIP = 1
+    # Mask
+    src_mask = generate_square_subsequent_mask(
+    dim1=BATCH_SIZE*n_heads,
+    dim2=output_sequence_length,
+    dim3=enc_seq_len,
+    device=device
+    )
 
-    enc = Encoder(INPUT_DIM, HIDDEN_SIZE, N_LAYERS, in_dropout=IN_DROPOUT)
-    dec = Decoder(OUTPUT_DIM, INPUT_DIM, HIDDEN_SIZE, N_LAYERS)
-    
-    model = Seq2Seq(enc, dec, device)
+    trg_mask = generate_square_subsequent_mask( 
+        dim1=BATCH_SIZE*n_heads,
+        dim2=output_sequence_length,
+        dim3=output_sequence_length,
+        device=device
+        )
+
+    # Eva Mask
+    src_eva_mask = generate_square_subsequent_mask(
+    dim1=1*n_heads,
+    dim2=output_sequence_length,
+    dim3=enc_seq_len,
+    device=device
+    )
+
+    trg_eva_mask = generate_square_subsequent_mask( 
+        dim1=1*n_heads,
+        dim2=output_sequence_length,
+        dim3=output_sequence_length,
+        device=device
+        )
+
+
+
+    print("enc_seq_len:",enc_seq_len)
+    print("output_sequence_length",output_sequence_length)
+
+    model = TimeSeriesTransformer(
+        dim_val=dim_val,
+        input_size=input_size, 
+        dec_seq_len=dec_seq_len,
+        max_seq_len=max_seq_len,
+        out_seq_len=output_sequence_length, 
+        n_decoder_layers=n_decoder_layers,
+        n_encoder_layers=n_encoder_layers,
+        n_heads=n_heads)
 
     print(f'The model has {count_parameters(model):,} trainable parameters')
     
@@ -249,10 +253,7 @@ if __name__ == '__main__':
 
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    # criterion = nn.MSELoss(reduction='mean')
     criterion = MaskedMSELoss()
-    # criterion = loss_function
-    # print("My loss function")
 
     history_train_loss = []
 
@@ -264,20 +265,20 @@ if __name__ == '__main__':
     print(f"Start Training ... ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
     for epoch in range(1,N_EPOCHS+1):
 
-        train_loss = train(model, train_dataset_dataloader, optimizer, criterion, CLIP, device=device)
+        train_loss = train(model, train_dataset_dataloader, optimizer, criterion, src_mask, trg_mask, device=device)
         history_train_loss.append(train_loss)
 
         valid_loss = []
         for v in valid_dataset_dataloader_list:
-            valid_loss.append(evaluate(model, v, criterion, device=device, epoch=epoch))
+            valid_loss.append(evaluate(model, v, criterion, src_eva_mask, trg_eva_mask, device=device, epoch=epoch))
         valid_loss = sum(valid_loss)/len(valid_loss)
 
         print(f"Epoch: {epoch}/{N_EPOCHS}. Train Loss: {train_loss:.8f}. Valid Loss: {valid_loss:.8f}. ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
 
         if epoch % SAVE_EPOCH == 0:
             # print(f"Epoch: {epoch}/{N_EPOCHS}. Loss: {train_loss:.8f}. ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
-            torch.save(model.state_dict(), f'./weight/seq2seq_weight_p{N_PHYSICS_DATA}_e{epoch}')
-            print(f"Save weight ./weight/seq2seq_weight_p{N_PHYSICS_DATA}_e{epoch}")
+            torch.save(model.state_dict(), f'./weight/transformer_weight_p{N_PHYSICS_DATA}_e{epoch}')
+            print(f"Save weight ./weight/transformer_weight_p{N_PHYSICS_DATA}_e{epoch}")
 
         # Early Stopping
         if args.early_stop:
@@ -288,18 +289,18 @@ if __name__ == '__main__':
                     break
             else:
                 trigger_times = 0
-                torch.save(model.state_dict(), f'./weight/seq2seq_weight_p{N_PHYSICS_DATA}_best')
+                torch.save(model.state_dict(), f'./weight/transformer_weight_p{N_PHYSICS_DATA}_best')
             last_valid_loss = valid_loss
                 
 
     OUTPUT_FOLDER = './weight'
-    WEIGHT_NAME = args.weight if args.weight else f'seq2seq_weight_p{N_PHYSICS_DATA}_e{epoch}'
+    WEIGHT_NAME = args.weight if args.weight else f'transformer_weight_p{N_PHYSICS_DATA}_e{epoch}'
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(OUTPUT_FOLDER,WEIGHT_NAME))
 
     fig, ax = plt.subplots()
     ax.plot(range(1, len(history_train_loss)+1) , history_train_loss)
-    ax.set_title('Seq2Seq')
+    ax.set_title('Transformer')
     ax.set_ylabel('Train Loss')
     ax.set_xlabel('Epoch')
 

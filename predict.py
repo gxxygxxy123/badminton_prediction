@@ -1,6 +1,7 @@
 import math
 import numpy as np
 import torch
+import torch.nn as nn
 import logging
 import seaborn as sns
 import os
@@ -11,6 +12,7 @@ import time
 
 from blstm import Blstm
 from threeDprojectTo2D import FitPlane, ProjectToPlane, ThreeDPlaneTo2DCoor, fit_3d, fit_2d, FitVerticalPlaneTo2D
+import transformer_train
 
 DIRNAME = os.path.dirname(os.path.abspath(__file__))
 ROOTDIR = os.path.dirname(DIRNAME)
@@ -18,24 +20,27 @@ sys.path.append(f"{ROOTDIR}/lib")
 from writer import CSVWriter
 from point import Point
 
-def predict2d(curve, model, model_type, max_predict_number=3000, touch_ground_stop=True, seq2seq_output_fps=None, move_origin_2d=True):
+def predict2d(curve, model, model_type, max_predict_number=120, touch_ground_stop=True, seq2seq_output_fps=None, move_origin_2d=True, device=torch.device('cpu')):
     # curve shape: (N,3), 3:XY,Z,t
 
     # curve = curve[:,:-1] # DEBUG remove timestamp
 
+    model.eval()
+
     N = curve.shape[0]
     BATCH_SIZE = 1
     curve =np.expand_dims(curve, axis=0) # One Batch
-    curve = torch.tensor(curve,dtype=torch.float)
+    curve = torch.tensor(curve,dtype=torch.float).to(device)
     # curve shape: (BATCH_SIZE, TIME_SEQ_LEN, IN_SIZE)
 
-    assert model_type == 'blstm' or model_type == 'seq2seq', "model_type should be blstm or seq2seq."
+    assert model_type == 'seq2seq' or model_type == 'transformer', "model_type should be blstm/seq2seq/transformer. bsltm TODO"
 
-    # move to origin, reset time
     init_state = curve[:,0].clone()
-    curve -= init_state
 
-    if model_type == 'blstm':
+    if model_type == 'blstm': # TODO
+        # move to origin, reset time
+        curve -= init_state
+
         for i in range(max_predict_number//N): # As long as you want
 
             prev = curve[:,-N:,:]
@@ -51,33 +56,93 @@ def predict2d(curve, model, model_type, max_predict_number=3000, touch_ground_st
 
             curve = torch.cat((curve,pred[:,:,:]),dim=1)
 
-            if touch_ground_stop:
-                if curve[0][-1][1]+init_state[0][1] <= 0: # Touch Ground
-                    while(curve[0][-2][1]+init_state[0][1] <= 0):
-                        curve = curve[:,:-1,:] # pop last point
-                    break
         
+        curve += init_state
 
     elif model_type == 'seq2seq':
-        src = torch.diff(curve,axis=1)
+        src = torch.diff(curve[:,:,[0,1]],axis=1).to(device)
 
-        trg = torch.zeros((BATCH_SIZE,max_predict_number,3))
+        trg = torch.zeros((BATCH_SIZE,max_predict_number,2)).to(device)
 
         output = model(src, [src.shape[1]], trg, [trg.shape[1]], seq2seq_output_fps, 0) # turn of teacher forcing
         # output=[BATCH_SIZE, TIME_SEQ_LEN, IN_SIZE]
 
-        output = output.cumsum(axis=1)
+        # output = output.cumsum(axis=1)
+        output = nn.functional.pad(output,(0,1),'constant', 1/seq2seq_output_fps)
+        output = torch.cumsum(output,dim=1) + curve[:,-1]
 
-        output = output + curve[:,-1,:]
+        curve = torch.cat((curve, output),dim=1)
 
-        curve = torch.cat((curve,output),dim=1)
         if touch_ground_stop:
             for i in range(curve.shape[1]):
-                if curve[0][i][1]+init_state[0][1] <= 0:
+                if curve[0][i][1] <= 0:
+                    curve = curve[:,:i,:]
+                    break
+    elif model_type == 'transformer':
+        src_len = 100 # TODO
+        max_predict_number = 1000 # TODO
+
+        n_heads = 2
+
+        src_eva_mask = transformer_train.generate_square_subsequent_mask(
+        dim1=1*n_heads,
+        dim2=max_predict_number,
+        dim3=src_len,
+        device=device
+        )
+
+        trg_eva_mask = transformer_train.generate_square_subsequent_mask( 
+            dim1=1*n_heads,
+            dim2=max_predict_number,
+            dim3=max_predict_number,
+            device=device
+        )
+
+
+        src = torch.diff(curve[:,:,[0,1,2]],axis=1).to(device)
+        src = nn.functional.pad(src,(0,0,0,src_len-src.size(-2)),'constant')
+
+        src_padding_mask = (src.any(dim=2)).bool()
+
+        trg = torch.zeros((BATCH_SIZE,max_predict_number,3)).to(device)
+
+        trg[:,0] = src[:,-1].detach().clone()
+
+        with torch.no_grad():
+            src = model.encoder_input_layer(src)
+            src = model.positional_encoding_layer(src)
+            src = model.encoder(
+                src=src,
+                src_key_padding_mask=src_padding_mask
+            )
+
+        for i in range(max_predict_number):
+            trg_padding_mask = (trg.any(dim=2)).bool()
+            with torch.no_grad():
+                decoder_output = model.decoder_input_layer(trg)
+                decoder_output = model.decoder(
+                    tgt=decoder_output,
+                    memory=src,
+                    tgt_mask=trg_eva_mask,
+                    memory_mask=src_eva_mask,
+                    tgt_key_padding_mask=trg_padding_mask
+                    )
+                decoder_output= model.linear_mapping(decoder_output.flatten(start_dim=1))
+                decoder_output = decoder_output.view((-1, model.out_seq_len, model.input_size))
+
+                trg[:,1:] = decoder_output[:,:-1]
+
+
+        output = torch.cumsum(trg[:,1:],dim=1) + curve[:,-1]
+
+        curve = torch.cat((curve, output),dim=1)
+
+        if touch_ground_stop:
+            for i in range(curve.shape[1]):
+                if curve[0][i][1] <= 0:
                     curve = curve[:,:i,:]
                     break
 
-    curve += init_state
     curve = np.squeeze(curve.detach().cpu().numpy(), axis=0)
 
     return curve # shape: (?,3), 3:XY,Z,t, include N points

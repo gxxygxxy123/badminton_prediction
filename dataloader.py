@@ -50,16 +50,17 @@ def points_change_fps(points_list: list, fps):
 
 
 class RNNDataSet(torch.utils.data.Dataset):
-    def __init__(self, dataset_path: str, fps=None, N=5, move_origin_2d=True, smooth_2d=True, smooth_3d=False, poly=8, network=None, csvfile='Model3D.csv'):
+    def __init__(self, dataset_path: str, fps=None, N=10, move_origin_2d=True, smooth_2d=True, smooth_3d=False, poly=8, network=None, csvfile='Model3D.csv'):
 
         # move_origin_2d: move the curve (self.src + self.trg) to origin
         super(RNNDataSet).__init__()
         self.trajectories_2d = {}
-        # self.trajectories_2d_new = {}
         self.trajectories_3d = {}
         self.trajectories_3d2d = {}
         self.src = [] # Used for training
         self.trg = [] # Used for training
+
+        self.N = N
 
         self.dataset_fps = fps
         self.dt = []
@@ -84,7 +85,7 @@ class RNNDataSet(torch.utils.data.Dataset):
                 for i in range(len(points)-1):
                     self.dt.append(points[i+1].timestamp-points[i].timestamp)
             # Change ts to fixed fps
-            else: 
+            else:
                 points = points_change_fps(points, self.dataset_fps)
 
             # Convert Data to numpy array
@@ -98,8 +99,6 @@ class RNNDataSet(torch.utils.data.Dataset):
 
             curve_2d, curve_3d2d, slope, intercept = FitVerticalPlaneTo2D(one_trajectory, smooth_2d=smooth_2d, poly=poly, smooth_2d_x_accel=True)
 
-            # curve_2d_new, _, _, _ = FitVerticalPlaneTo2D(one_trajectory, smooth_2d=smooth_2d, poly=poly, smooth_2d_x_accel=True) TO DELETE
-            # self.trajectories_2d_new[int(idx)] = curve_2d_new.copy() TO DELETE
             self.trajectories_2d[int(idx)] = curve_2d.copy()
             self.trajectories_3d2d[int(idx)] = curve_3d2d.copy()
 
@@ -114,8 +113,14 @@ class RNNDataSet(torch.utils.data.Dataset):
                 if curve_2d.shape[0] < N+1:
                     # no ground truth
                     continue
-                self.src.append(torch.from_numpy(np.diff(curve_2d[:N+1],axis=0)))
-                self.trg.append(torch.from_numpy(np.diff(curve_2d[N:],axis=0)))
+                self.src.append(torch.from_numpy(np.diff(curve_2d[:N,[0,1]],axis=0))) # debug remove t
+                self.trg.append(torch.from_numpy(np.diff(curve_2d[N-1:,[0,1]],axis=0))) # debug remove t
+            elif network == 'transformer':
+                if curve_2d.shape[0] < N+1:
+                    # no ground truth
+                    continue
+                self.src.append(torch.from_numpy(np.diff(curve_2d[:N],axis=0)))
+                self.trg.append(torch.from_numpy(np.diff(curve_2d[N-1:],axis=0)))
             elif network is None:
                 pass
             else:
@@ -131,6 +136,14 @@ class RNNDataSet(torch.utils.data.Dataset):
 
         if self.dataset_fps == None:
             self.dataset_fps = 1/(sum(self.dt)/len(self.dt))
+
+        if network == 'transformer':
+            max_src_length = 100
+            for i in range(len(self.src)):
+                self.src[i] = nn.functional.pad(self.src[i],(0,0,0,max_src_length-self.src[i].size(-2)),'constant')
+            max_trg_length = 1000
+            for i in range(len(self.trg)):
+                self.trg[i] = nn.functional.pad(self.trg[i],(0,0,0,max_trg_length-self.trg[i].size(-2)),'constant')
 
     def __len__(self):
         return len(self.src)
@@ -149,6 +162,9 @@ class RNNDataSet(torch.utils.data.Dataset):
         # t1,t2,t3,t4 : unequal length
         # t1 : np array, shape: [?, 4]  4 represents (X, Y, Z, t)
         return self.trajectories_3d
+
+    def N(self):
+        return self.N
 
     def whole_3d2d(self):
         # {1:t1, 2:t2, 3:t3, 4:t4} ...
@@ -206,7 +222,7 @@ class PhysicsDataSet_blstm(torch.utils.data.Dataset):
 
             self.src.append(trajectories[0:N,[0,2,3]])
             self.trg.append(trajectories[N:N*2,[0,2,3]])
-        
+
         self.src = np.stack(self.src, axis=0)
         self.trg = np.stack(self.trg, axis=0)
 
@@ -218,7 +234,7 @@ class PhysicsDataSet_blstm(torch.utils.data.Dataset):
 
 
 class PhysicsDataSet_seq2seq(torch.utils.data.Dataset):
-    def __init__(self, datas=0, in_max_time=0.2, out_max_time=3):
+    def __init__(self, datas=0, in_max_time=0.2, out_max_time=0.2):
 
         self.trajectories_2d = {}
         self.trajectories_3d2d = {}
@@ -229,11 +245,9 @@ class PhysicsDataSet_seq2seq(torch.utils.data.Dataset):
         self.output_fps = [] # Used for training
 
         fps_range = (25.0,150.0)
-        # fps_range = (118.0,122.0)
         elevation_range = (-80.0,80.0)
         speed_range = (5.0,250.0) # km/hr
         output_fps_range = (25.0,150.0) # Only used for Seq2Seq
-        # output_fps_range = (118.0,122.0) # Only used for Seq2Seq
 
         random_datas = np.random.uniform(low =[fps_range[0], elevation_range[0], speed_range[0], output_fps_range[0]],
                                                 high=[fps_range[-1],elevation_range[-1],speed_range[-1],output_fps_range[-1]],
@@ -251,24 +265,28 @@ class PhysicsDataSet_seq2seq(torch.utils.data.Dataset):
 
         starting_point = [0, 0, 3]
 
-        debug = False
+        debug = True
         if debug:
-            print(f"Debug: {debug} fps/out fps: 120, in_max_time: {in_max_time}  !!!!!!!!!!!!!!")
+            debug_fps = 60
+            self.debug_fps = debug_fps
+            print(f"Debug: {debug} out fps: {debug_fps}, Cut ground, No Add noise in in_t !!!!!!!!!!!!!!")
 
         idx = 1
         for fps,e,s,output_fps in random_datas:
-
             # Debug
             if debug:
-                fps = 120
-                output_fps = 120
+                fps = debug_fps
+                output_fps = debug_fps
 
-            in_t = sorted(np.random.choice(np.arange(0,in_max_time*fps)*(1/fps),
-                    size=round(random.uniform(2,in_max_time*fps)), # at least 2 point
-                    replace=False))
+            # in_t = np.sort(np.random.choice(np.arange(0,in_max_time*fps)*(1/fps),
+            #         size=round(random.uniform(2,in_max_time*fps)), # at least 1 vector
+            #         replace=False))
+            in_t = np.arange(0,round(random.uniform(2,in_max_time*fps)))*(1/fps)
 
+            # Add noise to in_t
+            # in_t += np.random.normal(0,0.1/fps,in_t.shape)
+            # in_t = in_t - in_t[0] # reset time to zero
 
-            in_t = in_t - in_t[0] # reset time to zero
             out_t = np.arange(0,out_max_time*output_fps)*(1/output_fps) + in_t[-1] + (1/output_fps)
 
             teval = np.concatenate((in_t, out_t))
@@ -283,15 +301,15 @@ class PhysicsDataSet_seq2seq(torch.utils.data.Dataset):
 
             assert len(in_t)+len(out_t) == trajectories.shape[0], " "
 
-            """ Input (x,y) not vector
-            self.src.append(trajectories[:len(in_t),[0,2,3]])
-            self.trg.append(trajectories[len(in_t):,[0,2,3]])
-            # self.output_fps.append(output_fps)
-            """
+            # Cut under ground part
+            while(trajectories[-1][2] <= 0):
+                trajectories = trajectories[:-1] # pop last point
+            if trajectories.shape[0] <= len(in_t):
+                continue
 
             # Input (x,y) is vector
-            self.src.append(torch.from_numpy(np.diff(trajectories[:len(in_t),[0,2,3]],axis=0)))
-            self.trg.append(torch.from_numpy(np.diff(trajectories[len(in_t)-1:,[0,2,3]],axis=0)))
+            self.src.append(torch.from_numpy(np.diff(trajectories[:len(in_t),[0,2]],axis=0))) # debug remove t
+            self.trg.append(torch.from_numpy(np.diff(trajectories[len(in_t)-1:,[0,2]],axis=0)))
             self.output_fps.append(torch.tensor(output_fps).float())
 
             self.trajectories_2d[int(idx)] = trajectories[:,[0,2,3]].copy()
@@ -320,6 +338,8 @@ class PhysicsDataSet_seq2seq(torch.utils.data.Dataset):
         # self.trg = np.stack(self.trg, axis=0)
         # pass
 
+        print(max([i.shape[0] for i in self.src]))
+
     def __len__(self):
         return len(self.src)
 
@@ -334,4 +354,106 @@ class PhysicsDataSet_seq2seq(torch.utils.data.Dataset):
 
     def whole_3d2d(self):
         return self.trajectories_3d2d
+
+    def fps(self):
+        return self.debug_fps #DEBUG
+
+    def src_maxlen(self):
+        return max(tra.size(dim=0) for tra in self.src)
+    def trg_maxlen(self):
+        return max(tra.size(dim=0) for tra in self.trg)
+
+class PhysicsDataSet_transformer(torch.utils.data.Dataset):
+    def __init__(self, datas=0, output_fps=300, in_max_time=0.2, out_max_time=4, max_src_length=100, max_trg_length=1000):
+
+        self.trajectories_2d = {}
+        self.trajectories_3d2d = {}
+
+
+        self.src = [] # Used for training
+        self.trg = [] # Used for decoder input
+        self.trg_y = [] # Used for loss
+        self.output_fps = output_fps
+
+        fps_range = (25.0,150.0)
+        # fps_range = (118.0,122.0)
+        elevation_range = (-80.0,80.0)
+        speed_range = (5.0,250.0) # km/hr
+
+
+        random_datas = np.random.uniform(low =[fps_range[0], elevation_range[0], speed_range[0]],
+                                                high=[fps_range[-1],elevation_range[-1],speed_range[-1]],
+                                                size=(datas,3))
+
+        print("===Physics Dataset===")
+        print(f"FPS: {fps_range[0]} ~ {fps_range[-1]}")
+        print(f"Elevation: {elevation_range[0]} ~ {elevation_range[-1]} degree")
+        print(f"Speed: {speed_range[0]} ~ {speed_range[-1]} km/hr")
+        print(f"Output Fps: {self.output_fps}")
+
+        print(f"In Max Time: {in_max_time}s")
+        print(f"Out Max Time: {out_max_time}s")
+        print(f"Datas: {random_datas.shape[0]}")
+
+        starting_point = [0, 0, 3]
+
+        idx = 1
+        for fps,e,s in random_datas:
+
+            in_t = sorted(np.random.choice(np.arange(0,in_max_time*fps)*(1/fps),
+                    size=round(random.uniform(2,in_max_time*fps)), # at least 2 point
+                    replace=False))
+
+
+            in_t = in_t - in_t[0] # reset time to zero
+            out_t = np.arange(0,out_max_time*self.output_fps)*(1/self.output_fps) + in_t[-1] + (1/self.output_fps)
+
+            teval = np.concatenate((in_t, out_t))
+
+            s = s * 1000/3600 # km/hr -> m/s
+            initial_velocity = [s * math.cos(e/180*math.pi), 0, s * math.sin(e/180*math.pi)]
+            traj = solve_ivp(bm_ball, [0, teval[-1]], starting_point + initial_velocity, t_eval = teval) # traj.t traj.y
+            xyz = np.swapaxes(traj.y[:3,:], 0, 1) # shape: (N points, 3)
+            t = np.expand_dims(traj.t,axis=1) # shape: (N points, 1)
+
+            trajectories = np.concatenate((xyz, t),axis=1) # shape: (N points, 4)
+
+            assert len(in_t)+len(out_t) == trajectories.shape[0], " "
+
+            # Input (x,y) is vector
+            self.src.append(torch.from_numpy(np.diff(trajectories[:len(in_t),[0,2,3]],axis=0)))
+            self.trg.append(torch.from_numpy(np.diff(trajectories[len(in_t)-1-1:-1,[0,2,3]],axis=0)))
+            self.trg_y.append(torch.from_numpy(np.diff(trajectories[len(in_t)-1:,[0,2,3]],axis=0)))
+
+            self.trajectories_2d[int(idx)] = trajectories[:,[0,2,3]].copy()
+            self.trajectories_3d2d[int(idx)] = trajectories.copy()
+            idx += 1
+
+        # stack with zero padding
+        for i in range(len(self.src)):
+            self.src[i] = nn.functional.pad(self.src[i],(0,0,0,max_src_length-self.src[i].size(-2)),'constant')
+        for i in range(len(self.trg)):
+            self.trg[i] = nn.functional.pad(self.trg[i],(0,0,0,max_trg_length-self.trg[i].size(-2)),'constant')
+        for i in range(len(self.trg_y)):
+            self.trg_y[i] = nn.functional.pad(self.trg_y[i],(0,0,0,max_trg_length-self.trg_y[i].size(-2)),'constant')
+
+    def __len__(self):
+        return len(self.src)
+
+    def __getitem__(self, index):
+        return self.src[index], self.trg[index], self.trg_y[index]
+
+    def whole_2d(self):
+        return self.trajectories_2d
+
+    def whole_3d(self):
+        return self.trajectories_3d2d
+
+    def whole_3d2d(self):
+        return self.trajectories_3d2d
+
+    def output_fps(self):
+        return self.output_fps
+
+
 

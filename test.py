@@ -12,6 +12,7 @@ from datetime import datetime
 from seq2seq import Seq2Seq
 from blstm import Blstm
 from seq2seq import Encoder, Decoder, Seq2Seq
+from transformer import TimeSeriesTransformer
 from threeDprojectTo2D import FitPlane, ProjectToPlane, ThreeDPlaneTo2DCoor, fit_3d, fit_2d, FitVerticalPlaneTo2D
 from dataloader import RNNDataSet, PhysicsDataSet_seq2seq
 from predict import predict3d, predict2d
@@ -26,6 +27,7 @@ parser = argparse.ArgumentParser(description="Trajectories Testing Program")
 parser.add_argument("-s","--seq", type=int, help="BLSTM & Seq2Seq Input Sequence", default=10)
 parser.add_argument("--blstm_weight", type=str, help="BLSTM Weight", default=None)
 parser.add_argument("--seq2seq_weight", type=str, help="Seq2Seq Weight", default=None)
+parser.add_argument("--transformer_weight", type=str, help="Transformer Weight", default=None)
 parser.add_argument("--folder", type=str, help="Test Folder", required=True)
 parser.add_argument('--no_show', action="store_true", help = 'No plt.show()')
 parser.add_argument("--fps", type=float, default=None, help="Trajectories FPS")
@@ -35,6 +37,7 @@ args = parser.parse_args()
 N = args.seq
 BLSTM_WEIGHT = args.blstm_weight
 SEQ2SEQ_WEIGHT = args.seq2seq_weight
+TRANSFORMER_WEIGHT = args.transformer_weight
 TEST_DATASET = args.folder
 fps = args.fps
 
@@ -43,7 +46,7 @@ device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 # Dataset
 test_dataset = RNNDataSet(dataset_path=TEST_DATASET, fps=fps, N=N, smooth_2d=True, smooth_3d=False)
-#test_dataset = PhysicsDataSet_seq2seq(datas=100, out_max_time=2)
+#test_dataset = PhysicsDataSet_seq2seq(datas=10)
 
 trajectories_2d = test_dataset.whole_2d()
 trajectories_3d = test_dataset.whole_3d()
@@ -119,9 +122,9 @@ if SEQ2SEQ_WEIGHT:
     seq2seq_time = []
     seq2seq_time_after_3d = []
 
-    INPUT_DIM = 3 # X Y t
-    OUTPUT_DIM = 3 # X Y t
-    HIDDEN_SIZE = 32
+    INPUT_DIM = 2 # X Y t
+    OUTPUT_DIM = 2 # X Y t
+    HIDDEN_SIZE = 256
     N_LAYERS = 2
     IN_DROPOUT = 0.0
 
@@ -145,8 +148,88 @@ if SEQ2SEQ_WEIGHT:
                 continue
             output_2d = predict2d(trajectory[:N], model, 'seq2seq', seq2seq_output_fps=test_dataset.fps())
 
-            p = ax2.plot(trajectory[:,0],trajectory[:,1],marker='o',markersize=2)
-            ax2.plot(output_2d[:,0],output_2d[:,1],marker='o',markersize=4,alpha=0.3,color=p[0].get_color(), linestyle='--')
+            p = ax2.plot(trajectory[:,0],trajectory[:,1],marker='o',markersize=1)
+            ax2.plot(output_2d[:,0],output_2d[:,1],marker='o',markersize=1,alpha=0.3,color=p[0].get_color(), linestyle='--')
+
+            dt += np.diff(output_2d[:,-1]).tolist()
+            #seq2seq_space_2d.append(space_err(trajectory[N:], output_2d[N:]))
+            #seq2seq_space_time_2d.append(space_time_err(trajectory[N:], output_2d[N:]))
+            #seq2seq_time.append(time_err(trajectory[N:], output_2d[N:]))
+        """
+        for idx, trajectory in trajectories_3d.items():
+            if trajectory.shape[0] < N:
+                continue
+
+            output_3d = predict3d(trajectory[:N], model, 'seq2seq', seq2seq_output_fps=test_dataset.fps())
+
+            seq2seq_space_3d.append(space_err(trajectory[N:], output_3d[N:]))
+            seq2seq_space_time_3d.append(space_time_err(trajectory[N:], output_3d[N:]))
+            tmp = []
+            for t in np.arange(0, 3, 0.1):
+                tmp.append(time_after_err(trajectory, output_3d, fps, fps, t))
+            seq2seq_time_after_3d.append(tmp)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            seq2seq_time_after_3d = np.nanmean(np.array(seq2seq_time_after_3d), axis=0)
+        """
+        ax_dt.hist(dt,color='red')
+        print(sum(dt)/len(dt))
+    # print(f"===Seq2Seq===")
+    # print(f"Weight: {SEQ2SEQ_WEIGHT}")
+    # print(f"Space Error 2D (Average): {np.nanmean(seq2seq_space_2d):.2f}m")
+    # print(f"Space Time Error 2D (Average): {np.nanmean(seq2seq_space_time_2d):.2f}m")
+    # print(f"Space Error 3D (Average): {np.nanmean(seq2seq_space_3d):.2f}m")
+    # print(f"Space Time Error 3D (Average): {np.nanmean(seq2seq_space_time_3d):.2f}m")
+    # print(f"Time Error (Average): {np.nanmean(seq2seq_time):.3f}s")
+
+    # ax2.plot(np.arange(0, 3, 0.1),time_after_error_3d)
+
+
+
+if not args.no_show:
+    plt.show()
+
+################### Method 3 ################# Transformer
+if TRANSFORMER_WEIGHT:
+    # Evaluation
+
+    dim_val = 32 # This can be any value divisible by n_heads. 512 is used in the original transformer paper.
+    n_heads = 2 # The number of attention heads (aka parallel attention layers). dim_val must be divisible by this number
+    n_decoder_layers = 2 # Number of times the decoder layer is stacked in the decoder
+    n_encoder_layers = 2 # Number of times the encoder layer is stacked in the encoder
+    input_size = 3 # The number of input variables. 1 if univariate forecasting.
+    dec_seq_len = 1000 # length of input given to decoder. Can have any integer value.
+    enc_seq_len = 100 # length of input given to encoder. Can have any integer value.
+    output_sequence_length = 1000 # Length of the target sequence, i.e. how many time steps should your forecast cover
+    max_seq_len = enc_seq_len # What's the longest sequence the model will encounter? Used to make the positional encoder
+
+    model = TimeSeriesTransformer(
+        dim_val=dim_val,
+        input_size=input_size, 
+        dec_seq_len=dec_seq_len,
+        max_seq_len=max_seq_len,
+        out_seq_len=output_sequence_length, 
+        n_decoder_layers=n_decoder_layers,
+        n_encoder_layers=n_encoder_layers,
+        n_heads=n_heads)
+    model.load_state_dict(torch.load(TRANSFORMER_WEIGHT))
+    model.eval()
+
+    fig2, ax2 = plt.subplots()
+    ax2.set_title(f"Seq2Seq, FPS({fps}), N({N}), weight({TRANSFORMER_WEIGHT})")
+
+    fig_dt, ax_dt = plt.subplots()
+    ax_dt.set_title("dt (Transformer)")
+    dt = []
+
+    with torch.no_grad():
+        for idx, trajectory in trajectories_2d.items():
+            if trajectory.shape[0] < N:
+                continue
+            output_2d = predict2d(trajectory[:N], model, 'transformer')
+
+            p = ax2.plot(trajectory[:,0],trajectory[:,1],marker='o',markersize=1)
+            ax2.plot(output_2d[:,0],output_2d[:,1],marker='o',markersize=1,alpha=0.3,color=p[0].get_color(), linestyle='--')
 
             dt += np.diff(output_2d[:,-1]).tolist()
             #seq2seq_space_2d.append(space_err(trajectory[N:], output_2d[N:]))
@@ -187,7 +270,7 @@ if not args.no_show:
     plt.show()
 
 sys.exit(0)
-################### Method 3 ################# Physics Model
+################### Method 4 ################# Physics Model
 
 # Evaluation
 physics_space_2d = []
