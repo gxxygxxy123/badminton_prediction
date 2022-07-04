@@ -165,7 +165,7 @@ class Seq2Seq(nn.Module):
         return mask
 
 
-    def forward(self, src, src_lens, trg, trg_lens, output_fps, teacher_forcing_ratio = 0.2):
+    def forward(self, src, src_lens, trg, trg_lens, output_fps, teacher_forcing_ratio = 0.5):
         #src.data = [batch size, src len, in_size]
         #trg.data = [batch size, trg len, out_size]
         #output_fps = []

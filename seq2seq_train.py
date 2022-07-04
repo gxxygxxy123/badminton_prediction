@@ -308,7 +308,7 @@ if __name__ == '__main__':
         infer_loss = []
         for dset in infer_dataset_list:
             for n in nnn:
-                i_loss = inference(model, dset, criterion, device=device, epoch=epoch, N=n, fps=fps)
+                i_loss = inference(model, dset, criterion, device=device, epoch=epoch, N=n, fps=dset.fps())
                 infer_loss.append(i_loss)
 
         infer_loss = sum(infer_loss)/len(infer_loss)

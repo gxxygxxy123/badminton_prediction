@@ -99,7 +99,7 @@ def evaluate(model, iterator, criterion, src_mask, trg_mask, device, epoch):
         for idx, trajectory in iterator.dataset.whole_2d().items():
             if trajectory.shape[0] < N:
                 continue
-            output_2d = predict.predict2d(trajectory[:N], model, 'transformer', device=device)
+            output_2d = predict.predict2d(trajectory[:N], model, 'transformer', input_fps=None, output_fps=None, output_time=None, device=device)
 
             p = ax.plot(trajectory[:,0],trajectory[:,1],marker='o',markersize=1)
             ax.plot(output_2d[:,0],output_2d[:,1],marker='o',markersize=1,alpha=0.3,color=p[0].get_color(), linestyle='--')
@@ -119,6 +119,44 @@ def evaluate(model, iterator, criterion, src_mask, trg_mask, device, epoch):
     plt.close(fig_dt)
 
     return epoch_loss / len(iterator)
+
+
+def inference(model, dataset, criterion, device, epoch, N, fps):
+
+    model.eval()
+
+    infer_loss = 0
+    infer_i = 0
+
+    fig,ax = plt.subplots()
+    ax.set_title(f"Epoch {epoch}")
+
+    with torch.no_grad():
+
+        for idx, trajectory in dataset.whole_2d().items():
+            if trajectory.shape[0] < N:
+                continue
+
+            output_2d = predict.predict2d(trajectory[:N], model, 'transformer', touch_ground_stop=False, input_fps=None, output_fps=None, output_time=None, device=device)
+
+            p = ax.plot(trajectory[:N,0], trajectory[:N,1], marker='o', markersize=1)
+            ax.plot(trajectory[N-1:,0], trajectory[N-1:,1], color=p[0].get_color(), linestyle='--')
+            ax.plot(output_2d[N:,0], output_2d[N:,1], alpha=0.3, color=p[0].get_color())
+
+            loss = criterion(torch.from_numpy(output_2d[N:trajectory.shape[0]]), torch.from_numpy(trajectory[N:]))
+        
+            infer_loss += loss.item()
+
+            infer_i += 1
+
+        if epoch % 1 == 0:
+            os.makedirs(args.fig_path, exist_ok=True)
+            fig.savefig(os.path.join(args.fig_path, f'{epoch}_{N}.png'),dpi=200)
+            ax.clear()
+
+    plt.close(fig)
+
+    return infer_loss / infer_i
 
 
 class MaskedMSELoss(torch.nn.Module):
@@ -182,14 +220,16 @@ if __name__ == '__main__':
     train_dataset_dataloader = torch.utils.data.DataLoader(dataset = train_dataset, batch_size = BATCH_SIZE, shuffle = True, drop_last=True)
 
 
-    # Valid Dataset
-    valid_dataset_dataloader_list = []
-    for fps in ([120]):
-        for n in ([20]):
-            valid_dataset_dataloader_list.append(
-                torch.utils.data.DataLoader(dataset = RNNDataSet(dataset_path="../trajectories_dataset/valid/",
-                fps=fps, N=n, move_origin_2d=False, smooth_2d=True, network='transformer'), batch_size = 1, shuffle = True, drop_last=True))
-                # torch.utils.data.DataLoader(dataset= PhysicsDataSet_transformer(datas=100),batch_size = 1, shuffle = True, drop_last=True))
+    # Inference Dataset
+    infer_dataset_list = []
+    fpsss = [120]
+    nnn = [6,12,18,24]
+
+    print(f"Inference first {nnn} points... Output FPS {fpsss}")
+    for fps in (fpsss):
+        infer_dataset_list.append(RNNDataSet(dataset_path="../trajectories_dataset/valid/", 
+                        fps=fps, smooth_2d=True, network='transformer'))
+
 
     dim_val = 32 # This can be any value divisible by n_heads. 512 is used in the original transformer paper.
     n_heads = 2 # The number of attention heads (aka parallel attention layers). dim_val must be divisible by this number
@@ -270,12 +310,15 @@ if __name__ == '__main__':
         train_loss = train(model, train_dataset_dataloader, optimizer, criterion, src_mask, trg_mask, device=device)
         history_train_loss.append(train_loss)
 
-        valid_loss = []
-        for v in valid_dataset_dataloader_list:
-            valid_loss.append(evaluate(model, v, criterion, src_eva_mask, trg_eva_mask, device=device, epoch=epoch))
-        valid_loss = sum(valid_loss)/len(valid_loss)
+        infer_loss = []
+        for dset in infer_dataset_list:
+            for n in nnn:
+                i_loss = inference(model, dset, criterion, device=device, epoch=epoch, N=n, fps=dset.fps())
+                infer_loss.append(i_loss)
 
-        print(f"Epoch: {epoch}/{N_EPOCHS}. Train Loss: {train_loss:.8f}. Valid Loss: {valid_loss:.8f}. ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
+        infer_loss = sum(infer_loss)/len(infer_loss)
+
+        print(f"Epoch: {epoch}/{N_EPOCHS}. Train Loss: {train_loss:.8f}. Infer Loss: {infer_loss:.8f}. ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
 
         if epoch % SAVE_EPOCH == 0:
             # print(f"Epoch: {epoch}/{N_EPOCHS}. Loss: {train_loss:.8f}. ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")

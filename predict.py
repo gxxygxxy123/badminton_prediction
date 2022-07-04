@@ -12,7 +12,7 @@ import time
 
 from blstm import Blstm
 from threeDprojectTo2D import FitPlane, ProjectToPlane, ThreeDPlaneTo2DCoor, fit_3d, fit_2d, FitVerticalPlaneTo2D
-#import transformer_train
+import transformer_train
 
 DIRNAME = os.path.dirname(os.path.abspath(__file__))
 ROOTDIR = os.path.dirname(DIRNAME)
@@ -68,9 +68,7 @@ def predict2d(curve, model, model_type, input_fps, output_fps, output_time, touc
             src = torch.diff(curve[:,in_dim],axis=0).to(device)
         else:
         # Input (x,y,t)
-            src = (curve[:,in_dim]
-            - curve[0,in_dim]
-            ).clone().detach()
+            src = (curve[:,in_dim] - curve[0,in_dim]).clone().detach()
             '''assert not torch.any(src[0]), "x,y,t is not 0"'''
 
         #src = [src len, in dim]
@@ -159,15 +157,29 @@ def predict2d(curve, model, model_type, input_fps, output_fps, output_time, touc
             device=device
         )
 
+        dxyt = False
 
-        src = torch.diff(curve[:,:,[0,1,2]],axis=1).to(device)
+        in_dim = [0,1,2] # [0,1]: xy [0,1,2]: xyt
+
+        # Input (dx,dy,dt)
+        if dxyt:
+            src = torch.diff(curve[:,in_dim],axis=0).to(device)
+        else:
+        # Input (x,y,t)
+            src = (curve[:,in_dim] - curve[0,in_dim]).clone().detach()
+            assert not torch.any(src[0])
+
+        trg = torch.zeros((max_predict_number,3)).to(device)
+
+        trg[0] = src[-1].detach().clone()
+
+        src = src.unsqueeze(0)
+
         src = nn.functional.pad(src,(0,0,0,src_len-src.size(-2)),'constant')
 
         src_padding_mask = (src.any(dim=2)).bool()
 
-        trg = torch.zeros((BATCH_SIZE,max_predict_number,3)).to(device)
 
-        trg[:,0] = src[:,-1].detach().clone()
 
         with torch.no_grad():
             src = model.encoder_input_layer(src)
@@ -178,9 +190,9 @@ def predict2d(curve, model, model_type, input_fps, output_fps, output_time, touc
             )
 
         for i in range(max_predict_number):
-            trg_padding_mask = (trg.any(dim=2)).bool()
+            trg_padding_mask = (trg.unsqueeze(0).any(dim=2)).bool()
             with torch.no_grad():
-                decoder_output = model.decoder_input_layer(trg)
+                decoder_output = model.decoder_input_layer(trg.unsqueeze(0))
                 decoder_output = model.decoder(
                     tgt=decoder_output,
                     memory=src,
@@ -191,17 +203,21 @@ def predict2d(curve, model, model_type, input_fps, output_fps, output_time, touc
                 decoder_output= model.linear_mapping(decoder_output.flatten(start_dim=1))
                 decoder_output = decoder_output.view((-1, model.out_seq_len, model.input_size))
 
-                trg[:,1:] = decoder_output[:,:-1]
+                trg[1:] = decoder_output.squeeze(0)[:-1]
 
 
-        output = torch.cumsum(trg[:,1:],dim=1) + curve[:,-1]
+        # Cumsum dx,dy,dt
+        if dxyt:
+            output = torch.cumsum(trg[1:],dim=0) + curve[-1]
+        else:
+            output = trg[1:] + curve[0]
 
-        curve = torch.cat((curve, output),dim=1)
+        curve = torch.cat((curve, output),dim=0)
 
         if touch_ground_stop:
-            for i in range(curve.shape[1]):
-                if curve[0][i][1] <= 0:
-                    curve = curve[:,:i,:]
+            for i in range(curve.shape[0]):
+                if curve[i][1] <= 0:
+                    curve = curve[:i,:]
                     break
 
     curve = curve.detach().cpu().numpy()

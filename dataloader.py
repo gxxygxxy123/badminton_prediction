@@ -139,11 +139,12 @@ class RNNDataSet(torch.utils.data.Dataset):
                 #     self.src.append(torch.from_numpy(curve_2d[:N,seq2seq_indim]-curve_2d[0,seq2seq_indim]))
                 #     self.trg.append(torch.from_numpy(curve_2d[N:,seq2seq_indim]-curve_2d[0,seq2seq_indim]))
             elif network == 'transformer':
-                if curve_2d.shape[0] < N+1:
-                    # no ground truth
-                    continue
-                self.src.append(torch.from_numpy(np.diff(curve_2d[:N],axis=0)))
-                self.trg.append(torch.from_numpy(np.diff(curve_2d[N-1:],axis=0)))
+                pass
+                # if curve_2d.shape[0] < N+1:
+                #     # no ground truth
+                #     continue
+                # self.src.append(torch.from_numpy(np.diff(curve_2d[:N],axis=0)))
+                # self.trg.append(torch.from_numpy(np.diff(curve_2d[N-1:],axis=0)))
             elif network is None:
                 pass
             else:
