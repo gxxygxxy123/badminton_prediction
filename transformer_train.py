@@ -18,7 +18,7 @@ import sys
 import predict
 sns.set()
 
-from dataloader import RNNDataSet, PhysicsDataSet_transformer
+from dataloader import RNNDataSet, PhysicsDataSet
 from transformer import TimeSeriesTransformer
 
 DIRNAME = os.path.dirname(os.path.abspath(__file__))
@@ -111,8 +111,10 @@ def evaluate(model, iterator, criterion, src_mask, trg_mask, device, epoch):
             ax_dt.hist(dt, color='red')
             ax_dt.set_title(f"dt (Transformer) mean{sum(dt)/len(dt):.5f}")
 
-    fig.savefig(f"./transformer_fig/{epoch}.png")
-    fig_dt.savefig(f"./transformer_fig/{epoch}_dt.png")
+    if epoch % 10 == 0:
+        os.makedirs(args.fig_path, exist_ok=True)
+        fig.savefig(os.path.join(args.fig_path, f'{epoch}.png')) 
+        fig_dt.savefig(os.path.join(args.fig_path, f'{epoch}_dt.png'))
     plt.close(fig)
     plt.close(fig_dt)
 
@@ -145,7 +147,6 @@ def generate_square_subsequent_mask(dim1: int, dim2: int, dim3: int, device=torc
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Transformer Training Program")
-    # parser.add_argument("-s","--seq", type=int, help="Input Time", required=True)
     parser.add_argument("-e","--epoch", type=int, help="Training Epochs", required=True)
     parser.add_argument("--physics_data", type=int, help="Training Datas", default=140000)
     parser.add_argument("--batch_size", type=int, help="Batch Size", default=64)
@@ -153,6 +154,7 @@ if __name__ == '__main__':
     parser.add_argument("-w","--weight", type=str, help="Ouput Weight name")
     parser.add_argument("--save_epoch", type=int, help="Save at each N epoch", default=100)
     parser.add_argument('--early_stop', action="store_true", help = 'Early Stop')
+    parser.add_argument('--fig_path', type=str)
     args = parser.parse_args()
 
     # N = args.seq # Time Sequence Number
@@ -173,10 +175,10 @@ if __name__ == '__main__':
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    output_fps = 300
+    output_fps = 120
 
     # Train Dataset
-    train_dataset = PhysicsDataSet_transformer(datas=N_PHYSICS_DATA, output_fps=output_fps)
+    train_dataset = PhysicsDataSet(datas=N_PHYSICS_DATA, model='transformer')
     train_dataset_dataloader = torch.utils.data.DataLoader(dataset = train_dataset, batch_size = BATCH_SIZE, shuffle = True, drop_last=True)
 
 
@@ -186,7 +188,7 @@ if __name__ == '__main__':
         for n in ([20]):
             valid_dataset_dataloader_list.append(
                 torch.utils.data.DataLoader(dataset = RNNDataSet(dataset_path="../trajectories_dataset/valid/",
-                fps=fps, N=n, move_origin_2d=False, smooth_2d=False, network='transformer'), batch_size = 1, shuffle = True, drop_last=True))
+                fps=fps, N=n, move_origin_2d=False, smooth_2d=True, network='transformer'), batch_size = 1, shuffle = True, drop_last=True))
                 # torch.utils.data.DataLoader(dataset= PhysicsDataSet_transformer(datas=100),batch_size = 1, shuffle = True, drop_last=True))
 
     dim_val = 32 # This can be any value divisible by n_heads. 512 is used in the original transformer paper.

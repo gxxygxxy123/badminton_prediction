@@ -12,7 +12,7 @@ import time
 
 from blstm import Blstm
 from threeDprojectTo2D import FitPlane, ProjectToPlane, ThreeDPlaneTo2DCoor, fit_3d, fit_2d, FitVerticalPlaneTo2D
-import transformer_train
+#import transformer_train
 
 DIRNAME = os.path.dirname(os.path.abspath(__file__))
 ROOTDIR = os.path.dirname(DIRNAME)
@@ -20,22 +20,20 @@ sys.path.append(f"{ROOTDIR}/lib")
 from writer import CSVWriter
 from point import Point
 
-def predict2d(curve, model, model_type, max_predict_number=120, touch_ground_stop=True, seq2seq_output_fps=None, move_origin_2d=True, device=torch.device('cpu')):
+def predict2d(curve, model, model_type, input_fps, output_fps, output_time, touch_ground_stop=True, move_origin_2d=True, device=torch.device('cpu')):
     # curve shape: (N,3), 3:XY,Z,t
-
-    # curve = curve[:,:-1] # DEBUG remove timestamp
+    assert curve.shape[-1] == 3, "curve shape should be (...,3)"
+    assert curve[0,2] == 0.0
 
     model.eval()
 
     N = curve.shape[0]
     BATCH_SIZE = 1
-    curve =np.expand_dims(curve, axis=0) # One Batch
+
     curve = torch.tensor(curve,dtype=torch.float).to(device)
-    # curve shape: (BATCH_SIZE, TIME_SEQ_LEN, IN_SIZE)
+    # curve shape: (TIME_SEQ_LEN, in dim)
 
     assert model_type == 'seq2seq' or model_type == 'transformer', "model_type should be blstm/seq2seq/transformer. bsltm TODO"
-
-    init_state = curve[:,0].clone()
 
     if model_type == 'blstm': # TODO
         # move to origin, reset time
@@ -50,7 +48,7 @@ def predict2d(curve, model, model_type, max_predict_number=120, touch_ground_sto
                 prev = prev - prev[:,0,:]
 
             pred = model(prev)
-            # pred shape: (BATCH_SIZE, TIME_SEQ_LEN, IN_SIZE)
+            # pred shape: (BATCH_SIZE, TIME_SEQ_LEN, in dim)
             if move_origin_2d:
                 pred = pred + tmp
 
@@ -60,23 +58,86 @@ def predict2d(curve, model, model_type, max_predict_number=120, touch_ground_sto
         curve += init_state
 
     elif model_type == 'seq2seq':
-        src = torch.diff(curve[:,:,[0,1]],axis=1).to(device)
 
-        trg = torch.zeros((BATCH_SIZE,max_predict_number,2)).to(device)
+        dxyt = True
 
-        output = model(src, [src.shape[1]], trg, [trg.shape[1]], seq2seq_output_fps, 0) # turn of teacher forcing
-        # output=[BATCH_SIZE, TIME_SEQ_LEN, IN_SIZE]
+        in_dim = [0,1] # [0,1]: xy [0,1,2]: xyt
 
-        # output = output.cumsum(axis=1)
-        output = nn.functional.pad(output,(0,1),'constant', 1/seq2seq_output_fps)
-        output = torch.cumsum(output,dim=1) + curve[:,-1]
+        # Input (dx,dy,dt)
+        if dxyt:
+            src = torch.diff(curve[:,in_dim],axis=0).to(device)
+        else:
+        # Input (x,y,t)
+            src = (curve[:,in_dim]
+            - curve[0,in_dim]
+            ).clone().detach()
+            '''assert not torch.any(src[0]), "x,y,t is not 0"'''
 
-        curve = torch.cat((curve, output),dim=1)
+        #src = [src len, in dim]
+
+        trg = [src[-1]] # list
+
+        ## DEBUG
+        #trg = [torch.zeros((model.decoder.input_dim)).to(device)]
+
+        src_lens = src.shape[0]
+
+        mask = model.create_mask(src.unsqueeze(0)) # BATCH_SIZE=1
+
+        # src = nn.functional.pad(src,(0,0,0,23-src.size(-2)),'constant') # debug
+
+        with torch.no_grad():
+            encoder_outputs, hidden = model.encoder(src.unsqueeze(0), torch.LongTensor([src_lens])) # BATCH_SIZE=1
+
+        max_len = int(output_fps*output_time)
+
+        attentions = torch.zeros(BATCH_SIZE, max_len, src_lens).to(device)
+
+        for i in range(max_len):
+            trg_tensor = trg[-1].unsqueeze(0) # BATCH_SIZE=1
+
+            with torch.no_grad():
+                output, hidden, attention = model.decoder(trg_tensor, hidden, encoder_outputs, mask)
+                #output = [batch size, out dim]
+                #attentions = [batch size, src len]
+            attentions[:,i,:] = attention
+
+            pred = output.squeeze(0)
+            #pred = [out dim]
+
+            trg.append(pred)
+
+        # Remove first element(src[-1])
+        output = torch.stack(trg[1:])
+
+        #output = [max len, out dim]
+
+
+        # output = model(src, [src_lens], trg, [trg.shape[1]], output_fps, 0) # turn of teacher forcing
+        # output=[BATCH_SIZE, TIME_SEQ_LEN, in dim]
+
+        if in_dim == [0,1]:
+        # Add dt if input_dim only dx,dy
+            if dxyt:
+                output = nn.functional.pad(output,(0,1),'constant', 1/output_fps)
+            else:
+                ss = output.shape[0]
+                last_t = curve[-1][2].detach().clone().cpu()
+                pad_t = (torch.arange(ss)*(1/output_fps) + last_t + 1/output_fps).unsqueeze(1).to(device)
+                output = torch.cat((output,pad_t),dim=1)
+
+        # Cumsum dx,dy,dt
+        if dxyt:
+            output = torch.cumsum(output,dim=0) + curve[-1]
+        else:
+            output = output + curve[0]
+
+        curve = torch.cat((curve, output),dim=0)
 
         if touch_ground_stop:
-            for i in range(curve.shape[1]):
-                if curve[0][i][1] <= 0:
-                    curve = curve[:,:i,:]
+            for i in range(curve.shape[0]):
+                if curve[i][1] <= 0:
+                    curve = curve[:i,:]
                     break
     elif model_type == 'transformer':
         src_len = 100 # TODO
@@ -143,7 +204,9 @@ def predict2d(curve, model, model_type, max_predict_number=120, touch_ground_sto
                     curve = curve[:,:i,:]
                     break
 
-    curve = np.squeeze(curve.detach().cpu().numpy(), axis=0)
+    curve = curve.detach().cpu().numpy()
+
+    assert curve.ndim == 2 and curve.shape[1] == 3
 
     return curve # shape: (?,3), 3:XY,Z,t, include N points
 

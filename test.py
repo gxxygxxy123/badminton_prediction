@@ -11,10 +11,10 @@ import warnings
 from datetime import datetime
 from seq2seq import Seq2Seq
 from blstm import Blstm
-from seq2seq import Encoder, Decoder, Seq2Seq
+from seq2seq import Attention, Encoder, Decoder, Seq2Seq
 from transformer import TimeSeriesTransformer
 from threeDprojectTo2D import FitPlane, ProjectToPlane, ThreeDPlaneTo2DCoor, fit_3d, fit_2d, FitVerticalPlaneTo2D
-from dataloader import RNNDataSet, PhysicsDataSet_seq2seq
+from dataloader import RNNDataSet, PhysicsDataSet
 from predict import predict3d, predict2d
 from physic_model import physics_predict3d
 from error_function import space_err, time_err, space_time_err, time_after_err
@@ -122,14 +122,17 @@ if SEQ2SEQ_WEIGHT:
     seq2seq_time = []
     seq2seq_time_after_3d = []
 
-    INPUT_DIM = 2 # X Y t
-    OUTPUT_DIM = 2 # X Y t
-    HIDDEN_SIZE = 256
-    N_LAYERS = 2
-    IN_DROPOUT = 0.0
+    INPUT_DIM = 3 # X Y t
+    OUTPUT_DIM = 3 # X Y t
+    ENC_HID_DIM = 128
+    DEC_HID_DIM = 64
+    N_LAYERS = 1
+    ENC_DROPOUT = 0.0
+    DEC_DROPOUT = 0.0
 
-    enc = Encoder(INPUT_DIM, HIDDEN_SIZE, N_LAYERS, in_dropout=IN_DROPOUT)
-    dec = Decoder(OUTPUT_DIM, INPUT_DIM, HIDDEN_SIZE, N_LAYERS)
+    attn = Attention(ENC_HID_DIM, DEC_HID_DIM)
+    enc = Encoder(INPUT_DIM, ENC_HID_DIM, N_LAYERS, DEC_HID_DIM, dropout=ENC_DROPOUT)
+    dec = Decoder(OUTPUT_DIM, INPUT_DIM, ENC_HID_DIM, DEC_HID_DIM, N_LAYERS, attn, dropout=DEC_DROPOUT)
 
     model = Seq2Seq(encoder=enc, decoder=dec)
     model.load_state_dict(torch.load(SEQ2SEQ_WEIGHT))
@@ -146,10 +149,11 @@ if SEQ2SEQ_WEIGHT:
         for idx, trajectory in trajectories_2d.items():
             if trajectory.shape[0] < N:
                 continue
-            output_2d = predict2d(trajectory[:N], model, 'seq2seq', seq2seq_output_fps=test_dataset.fps())
+            output_2d = predict2d(trajectory[:N], model, 'seq2seq', input_fps=None, output_fps=fps, output_time=3)
 
-            p = ax2.plot(trajectory[:,0],trajectory[:,1],marker='o',markersize=1)
-            ax2.plot(output_2d[:,0],output_2d[:,1],marker='o',markersize=1,alpha=0.3,color=p[0].get_color(), linestyle='--')
+            p = ax2.plot(trajectory[:N,0], trajectory[:N,1], marker='o', markersize=1)
+            ax2.plot(trajectory[N-1:,0], trajectory[N-1:,1], color=p[0].get_color(), linestyle='--')
+            ax2.plot(output_2d[:,0], output_2d[:,1], alpha=0.3, color=p[0].get_color())
 
             dt += np.diff(output_2d[:,-1]).tolist()
             #seq2seq_space_2d.append(space_err(trajectory[N:], output_2d[N:]))
